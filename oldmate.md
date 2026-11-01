@@ -1,6 +1,6 @@
 # OldMate — the plan, as built
 
-**Status: built. `OldMate.mq5` exists, preflight-clean, 3 211 lines.** It has not yet been
+**Status: built. `OldMate.mq5` exists, preflight-clean, 3 297 lines.** It has not yet been
 compiled in MetaEditor or run on a demo account — that is the only step left, and section 17
 says exactly how to judge it.
 
@@ -372,6 +372,23 @@ Two more of the same class were found by sweeping for the pattern rather than wa
 the next compile: every `datetime` subtraction in the file (five of them) is now done in
 `long`, and the enum ternary in `OnInit` is cast explicitly. The checker was also taught the
 `ENUM_*` return type, which it had been misreading as an unknown function.
+
+**Field question answered: why no trade on M30 with `2/3 BUY`.** There were two
+independent blockers, and the panel was hiding both.
+
+1. **`Market status unknown` stopped every send.** The broker publishes no session table for
+   crypto symbols, so `g_sessCount` was zero and the state was reported as unknown — which
+   `SendPlan` correctly refuses. The consequence was that no crypto symbol could ever trade.
+   No published session table means the symbol is not session-restricted, not that the state is
+   unknown, so it is now `Market open (no session table)` — with trade mode, connection and quote
+   freshness still checked, so a genuinely closed or stale symbol still stops.
+2. **A finished plan could read `READY` while nothing was sent.** `PlanStateText` now asks the
+   same gate `SendPlan` asks, and prints `HOLD: <the blocker>` instead.
+
+Every refusal now also carries its arithmetic, shown on hover: the spread against its hourly
+median and gate, the open risk against the cap, the stop against the prime minimum, the measured
+target against the spread, and — the one that most often bites a small account —
+`budget $1.93 (0.50% of $385.19); one lot risks $300.00 at this stop; min lot 0.01 risks $3.00`.
 
 **Field feedback on the panel, fixed.** The first screenshot from a live chart
 showed four things wrong, all now corrected:

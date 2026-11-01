@@ -228,7 +228,8 @@ struct LanePlan
    double   tp;
    double   tp1;
    double   lot;
-   string   note;
+   string   note;         // why there is no usable plan
+   string   diag;         // the numbers behind that reason, shown on hover
 };
 
 struct LaneFill
@@ -702,9 +703,14 @@ void RefreshMarket()
    }
    else if(g_sessCount == 0)
    {
-      //  No published session table is not a closure. Reporting "closed" here
-      //  would be exactly the false report the rules forbid.
-      g_m.status = 5; g_m.text = "Market status unknown"; g_m.colour = clrSilver;
+      //  The broker publishes no session table for this symbol, which means it
+      //  is not session-restricted - not that we do not know. Saying so, and
+      //  saying why, is honest; blocking it forever made crypto untradeable.
+      //  Trade mode and quote freshness are still checked above, so a symbol
+      //  that is genuinely closed or stale still stops here.
+      g_m.status = 0;
+      g_m.text = "Market open (no session table)";
+      g_m.colour = clrLime;
    }
    else if(!open)
    {
@@ -748,6 +754,26 @@ bool TerminalAllowsTrade()
 {
    return(TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0 &&
           MQLInfoInteger(MQL_TRADE_ALLOWED) != 0);
+}
+
+//  Everything that stands between a finished plan and a sent order, in the
+//  order SendPlan checks it.  "" means nothing is in the way.
+string SendBlocker(int idx)
+{
+   if(!InpAutoTrade)                    return("master switch off");
+   if(!LaneAllowed(idx))                return(g_lane[idx].name + " switch off");
+   if(!TerminalAllowsTrade())           return("terminal is blocking it");
+   if(g_m.status != 0)
+   {
+      if(g_m.status == 1) return("market closed");
+      if(g_m.status == 2) return("disconnected");
+      if(g_m.status == 3) return("stale quote");
+      if(g_m.status == 4) return("trading unavailable");
+      return("market status unknown");
+   }
+   if(NettingOppositeVolume(g_plan[idx].dir) > 0.0) return("netting conflict");
+   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return("lane risk cap");
+   return("");
 }
 
 string AutoTradeText()
@@ -1887,9 +1913,10 @@ bool MeasureTarget(int idx, int dir, double riskPrice, double tick,
 //  SIZE - 0.5% of equity, converted by the terminal's own money
 //  calculation.  Never hand arithmetic, never an assumed pip value.
 //====================================================================
-double CalcLot(int dir, double entry, double sl, string &why)
+double CalcLot(int dir, double entry, double sl, string &why, string &diag)
 {
    why = "";
+   diag = "";
    if(entry <= 0.0 || sl <= 0.0) { why = "cannot size"; return(0.0); }
 
    ENUM_ORDER_TYPE t = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -1901,6 +1928,10 @@ double CalcLot(int dir, double entry, double sl, string &why)
 
    double budget = AccountInfoDouble(ACCOUNT_EQUITY) * RISK_PCT / 100.0;
    double lots   = budget / lossPerLot;
+   diag = StringFormat("budget $%.2f (%.2f%% of $%.2f); one lot risks $%.2f at this stop; "
+                       "min lot %.2f risks $%.2f",
+                       budget, RISK_PCT, AccountInfoDouble(ACCOUNT_EQUITY),
+                       lossPerLot, g_f.volMin, lossPerLot * g_f.volMin);
 
    double step = g_f.volStep;
    double mn   = g_f.volMin;
@@ -1960,6 +1991,7 @@ void PlanClear(int idx)
    g_plan[idx].tp1 = 0.0;
    g_plan[idx].lot = 0.0;
    g_plan[idx].note = "";
+   g_plan[idx].diag = "";
 }
 
 bool BuildPlan(int idx)
@@ -1988,11 +2020,22 @@ bool BuildPlan(int idx)
    double typical = SpreadBaseline(st.hour, sn);
    double gateX = (g_p.spreadGateX > 0.0) ? g_p.spreadGateX : MAX_SPREAD_GATE;
    if(sn >= 20 && typical > 0.0 && spread > typical * gateX)
-   { g_plan[idx].note = "WAIT: spread too wide"; return(false); }
+   {
+      g_plan[idx].note = "WAIT: spread too wide";
+      g_plan[idx].diag = StringFormat("spread %.0f pts, median for this hour %.0f, "
+                                      "gate %.1f x median = %.0f",
+                                      spread / point, typical, gateX, typical * gateX);
+      return(false);
+   }
 
    //  Total exposure cap across lanes.
    if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9)
-   { g_plan[idx].note = "WAIT: lane risk cap reached"; return(false); }
+   {
+      g_plan[idx].note = "WAIT: lane risk cap reached";
+      g_plan[idx].diag = StringFormat("already open %.2f%% + this idea %.2f%% > cap %.2f%%",
+                                      OpenRiskPct(), RISK_PCT, RISK_TOTAL_PCT);
+      return(false);
+   }
 
    int window = LaneStructWindow(idx);
    int need   = window + 4;
@@ -2029,7 +2072,13 @@ bool BuildPlan(int idx)
             if(p >= bid + offset && (level == 0.0 || p < level)) level = p;
          }
       }
-      if(level <= 0.0) { g_plan[idx].note = "WAIT: no swing to rest the limit on"; return(false); }
+      if(level <= 0.0)
+      {
+         g_plan[idx].note = "WAIT: no swing to rest the limit on";
+         g_plan[idx].diag = StringFormat("no confirmed turn in the last %d bars on the "
+                                         "correct side of the quote", window);
+         return(false);
+      }
       entry = (dir > 0) ? SnapDown(level, tick) : SnapUp(level, tick);
    }
 
@@ -2048,7 +2097,12 @@ bool BuildPlan(int idx)
             stopLevel = r[k].high;
       }
    }
-   if(stopLevel <= 0.0) { g_plan[idx].note = "WAIT: no swing to hide the stop behind"; return(false); }
+   if(stopLevel <= 0.0)
+   {
+      g_plan[idx].note = "WAIT: no swing to hide the stop behind";
+      g_plan[idx].diag = StringFormat("no confirmed turn beyond the entry in %d bars", window);
+      return(false);
+   }
 
    double buffer = MathMax(tick * g_p.stopBufferTicks, spread);
    double sl = (dir > 0) ? SnapDown(stopLevel - buffer, tick)
@@ -2061,7 +2115,12 @@ bool BuildPlan(int idx)
    {
       double minDist = (double)g_f.stopsLevel * point;
       if((dir > 0 && (ask - sl) < minDist) || (dir < 0 && (sl - bid) < minDist))
-      { g_plan[idx].note = "WAIT: stop inside broker minimum"; return(false); }
+      {
+         g_plan[idx].note = "WAIT: stop inside broker minimum";
+         g_plan[idx].diag = StringFormat("stop %.0f pts away, broker minimum %.0f pts",
+                                         MathAbs(entry - sl) / point, minDist / point);
+         return(false);
+      }
    }
 
    //  ---- target ------------------------------------------------------
@@ -2069,7 +2128,14 @@ bool BuildPlan(int idx)
    int reachN = 0;
    string tWhy = "";
    if(!MeasureTarget(idx, dir, risk, tick, dist, reach, reachN, medBars, tWhy))
-   { g_plan[idx].note = "WAIT: " + tWhy; return(false); }
+   {
+      g_plan[idx].note = "WAIT: " + tWhy;
+      g_plan[idx].diag = StringFormat("replay window %d bars, %d needed cases; "
+                                      "history available %d bars",
+                                      REPLAY_BARS, TP_MIN_CASES,
+                                      Bars(_Symbol, g_lane[idx].tf));
+      return(false);
+   }
 
    double tp = (dir > 0) ? SnapDown(entry + dist, tick) : SnapUp(entry - dist, tick);
 
@@ -2095,13 +2161,24 @@ bool BuildPlan(int idx)
 
    double tpDist = MathAbs(tp - entry);
    if(spread > 0.0 && tpDist < spread * TP_COST_X)
-   { g_plan[idx].note = "WAIT: target does not clear spread"; return(false); }
+   {
+      g_plan[idx].note = "WAIT: target does not clear spread";
+      g_plan[idx].diag = StringFormat("target %.0f pts, needs %.1f x spread of %.0f = %.0f pts",
+                                      tpDist / point, TP_COST_X, spread / point,
+                                      spread * TP_COST_X / point);
+      return(false);
+   }
    if(tpDist <= 0.0) { g_plan[idx].note = "WAIT: target too small"; return(false); }
 
    //  ---- size --------------------------------------------------------
-   string sWhy = "";
-   double lot = CalcLot(dir, entry, sl, sWhy);
-   if(lot <= 0.0) { g_plan[idx].note = "WAIT: " + sWhy; return(false); }
+   string sWhy = "", sDiag = "";
+   double lot = CalcLot(dir, entry, sl, sWhy, sDiag);
+   if(lot <= 0.0)
+   {
+      g_plan[idx].note = "WAIT: " + sWhy;
+      g_plan[idx].diag = sDiag;
+      return(false);
+   }
 
    g_plan[idx].ok     = true;
    g_plan[idx].dir    = dir;
@@ -2771,8 +2848,12 @@ string PlanStateText(int idx)
 {
    if(!g_lane[idx].ready) return("DATA WAIT");
    if(g_lane[idx].signal == 0) return("NO SIGNAL");
-   if(g_plan[idx].ok) return("READY");
-   return(g_plan[idx].note);
+   if(!g_plan[idx].ok) return(g_plan[idx].note);
+
+   //  A finished plan is only "READY" if it could actually be sent right now.
+   string blocker = SendBlocker(idx);
+   if(blocker != "") return("HOLD: " + blocker);
+   return("READY");
 }
 
 color PlanStateColour(int idx)
@@ -2891,6 +2972,11 @@ void DrawPanel()
                 DoubleToString(MathAbs(g_plan[i].entry - g_plan[i].sl) / g_f.point, 0) + ")";
       }
       string tip = "WAIT is not a failure: it is the EA refusing to invent a level it cannot measure.";
+      if(!g_plan[i].ok && g_plan[i].diag != "")
+         tip = g_plan[i].note + "  ||  " + g_plan[i].diag;
+      else if(g_plan[i].ok && SendBlocker(i) != "")
+         tip = "The plan is finished, but it cannot be sent: " + SendBlocker(i) + ". "
+               "It will be sent on the first bar where nothing is in the way.";
       if(!g_lane[i].ready)
          tip = StringFormat("This lane needs %d closed bars and the terminal has %d. Nothing is claimed until it has them.",
                             g_lane[i].needBars, g_lane[i].haveBars);

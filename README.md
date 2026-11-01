@@ -1,6 +1,6 @@
 # OldMate — conventional autotrading for MT5
 
-**Status: built.** `OldMate.mq5` — 3 211 lines, preflight-clean, arithmetic verified by a
+**Status: built.** `OldMate.mq5` — 3 297 lines, preflight-clean, arithmetic verified by a
 Python reference. **Not yet compiled in MetaEditor and not yet run on a demo account.** That is
 the only step left, and [oldmate.md](oldmate.md) section 13 says exactly how to judge it.
 
