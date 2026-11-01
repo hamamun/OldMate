@@ -152,7 +152,6 @@ struct MarketState
    int      status;        // 0 open, 1 closed, 2 disconnected, 3 stale, 4 unavailable, 5 unknown
    string   text;
    color    colour;
-   datetime untilOpen;
    string   session;
    bool     sessionEst;
    double   spreadPoints;
@@ -183,9 +182,6 @@ struct LaneState
    double   momValue;
    double   pushValue;
    double   stretchValue;
-   bool     momOk;
-   bool     pushOk;
-   bool     stretchOk;
 
    //  memory
    int      memory;
@@ -193,7 +189,6 @@ struct LaneState
    double   hurstRs;
    double   varRatio;
    int      volState;      // 0 quiet, 1 normal, 2 wild
-   double   volPct;
 
    //  declared facts
    int      trend;         // -1 / 0 / +1
@@ -269,14 +264,12 @@ LaneFill      g_fill[LANE_COUNT];
 double        g_spr[24][SPREAD_SAMPLES];
 int           g_sprN[24];
 
-double        g_unit[LANE_COUNT];        // the measured unit, per lane
 
 datetime      g_lastRefTable = 0;
 datetime      g_lastSession  = 0;
 datetime      g_lastSample   = 0;
 datetime      g_lastDraw     = 0;
 
-string        g_currency  = "USD";
 CTrade        g_trade;
 CPositionInfo g_pos;
 
@@ -786,7 +779,6 @@ void RefreshMarket()
    else if(!open)
    {
       g_m.status = 1;
-      g_m.untilOpen = nextOpen;
       if(nextOpen > 0)
          g_m.text = "Market closed - opens " + TimeToString(nextOpen, TIME_MINUTES) +
                     " (in " + HumanDelta(ServerNow(), nextOpen) + ")";
@@ -1574,7 +1566,6 @@ int      g_pendVote[PEND_MAX][3];
 int      g_pendScore[PEND_MAX];
 int      g_pendSpoke[PEND_MAX];
 double   g_pendLevel[PEND_MAX];
-int      g_pendTF[PEND_MAX];
 
 void PendCall(int idx, int dir, int vm, int vp, int vs, double level,
               int score, int spoke)
@@ -1609,7 +1600,6 @@ void PendCall(int idx, int dir, int vm, int vp, int vs, double level,
    g_pendScore[slot] = score;
    g_pendSpoke[slot] = spoke;
    g_pendLevel[slot] = level;
-   g_pendTF[slot]    = (int)g_lane[idx].tf;
 }
 
 void GradePending(int idx, double closeNow)
@@ -1701,9 +1691,11 @@ bool UpdateLane(int idx)
    double tick = g_f.tick > 0.0 ? g_f.tick : g_f.point;
 
    //  ---- the measured unit -------------------------------------------
+   //  Median close-to-close move, floored at one tick.  It divides the
+   //  envelope width before that width is ranked, which is what makes
+   //  Quiet / Normal / Wild mean the same thing on gold and on EUR/USD.
    double unit = UnitAt(close, end, 20);
    if(unit <= 0.0) unit = tick;
-   g_unit[idx] = unit;
 
    //  ---- momentum ----------------------------------------------------
    double mv[], ms[];
@@ -1730,7 +1722,6 @@ bool UpdateLane(int idx)
    double sigNow = IsNA(ms[end]) ? 0.0 : ms[end];
    g_lane[idx].momValue = IsNA(mv[end]) ? 0.0 : mv[end];
    g_lane[idx].vMom = MomentumVote(g_lane[idx].momValue, sigNow, momPct, momOk);
-   g_lane[idx].momOk = momOk;
 
    //  ---- push --------------------------------------------------------
    double pdi[], mdi[], adx[];
@@ -1763,7 +1754,6 @@ bool UpdateLane(int idx)
    g_lane[idx].vPush = PushVote(IsNA(pdi[end]) ? 0.0 : pdi[end],
                                 IsNA(mdi[end]) ? 0.0 : mdi[end],
                                 adxPct, diffPct, pushOk);
-   g_lane[idx].pushOk = pushOk;
 
    //  ---- stretch -----------------------------------------------------
    double pos[], bw[];
@@ -1790,7 +1780,6 @@ bool UpdateLane(int idx)
 
    g_lane[idx].stretchValue = IsNA(pos[end]) ? 0.0 : pos[end];
    g_lane[idx].vStretch = StretchVote(posPct, stretchOk);
-   g_lane[idx].stretchOk = stretchOk;
 
    //  ---- memory and condition ----------------------------------------
    double dfa = 0.0, rs = 0.0, vr = 0.0;
@@ -1801,12 +1790,10 @@ bool UpdateLane(int idx)
 
    if(volOk)
    {
-      g_lane[idx].volPct  = bwPct;
       g_lane[idx].volState = (bwPct <= 20.0) ? 0 : ((bwPct >= 80.0) ? 2 : 1);
    }
    else
    {
-      g_lane[idx].volPct  = 50.0;
       g_lane[idx].volState = 1;
    }
 
@@ -3223,8 +3210,12 @@ void DrawDetails()
                            g_lane[i].hurstDfa, g_lane[i].hurstRs, g_lane[i].varRatio),
            clrSilver, "Detrended fluctuation, rescaled range, and the variance ratio. A disagreement reads Unclear.");
       if(g_lane[i].reachN > 0)
-         PAdd(1, StringFormat("   analogue reach %.0f%% of %d",
+         PAdd(1, StringFormat("   analogue reach %.0f%% of %d", 
                               g_lane[i].reachPct, g_lane[i].reachN), clrSilver, "");
+      if(g_lane[i].durabOk)
+         PAdd(1, StringFormat("   %d bars to target, on average",
+                              g_lane[i].durabPct), clrSilver,
+              "Median bars taken by the analogues that did reach their target.");
    }
 
    //  Beside the main panel when there is room, below it when there is not.
@@ -3352,7 +3343,6 @@ int OnInit()
    ReadSessions();
    RefreshMarket();
 
-   g_currency = g_f.currency;
    g_trade.SetExpertMagicNumber(LaneMagic(0));
    g_trade.SetTypeFilling((ENUM_ORDER_TYPE_FILLING)PickFilling());
    g_trade.SetDeviationInPoints(20);
