@@ -49,6 +49,9 @@ input bool   InpBypassRisk   = false;  // Bypass risk budget
 #define DETAIL_PREFIX      "OMD_"
 #define PANEL_X            12
 #define PANEL_Y            22
+//  Shown on the panel and printed at attach.  A field report is only readable
+//  if both sides know which build produced it.
+#define EA_BUILD           "1.08"
 #define FONT_NAME          "Consolas"
 #define FONT_SIZE          9
 #define DRAW_MIN_MS        1000
@@ -249,8 +252,15 @@ AssetProfile  g_base;
 AssetProfile  g_p;
 MarketState   g_m;
 
-SessionRec    g_sess[MAX_SESSIONS];
-int           g_sessCount = 0;
+//  MT5 publishes TWO tables per symbol and they answer different questions:
+//    quote sessions - when the broker is quoting, i.e. when the market is OPEN
+//    trade sessions - when the broker accepts orders, i.e. when we may SEND
+//  They are frequently not the same, and either one may be empty. Reading only
+//  the trade table made every symbol look like it had no sessions at all.
+SessionRec    g_sessQ[MAX_SESSIONS];  // quote table: is the market open
+SessionRec    g_sessT[MAX_SESSIONS];  // trade table: may an order be sent
+int           g_sessQN = 0;
+int           g_sessTN = 0;
 
 LaneState     g_lane[LANE_COUNT];
 LanePlan      g_plan[LANE_COUNT];
@@ -545,73 +555,143 @@ double SpreadBaseline(int hour, int &samples)
 //====================================================================
 //  SESSIONS  - the broker's own table, never a guess
 //====================================================================
-void ReadSessions()
+//  One day's worth of session records, in seconds since local midnight.
+//  A "to" of 00:00 means midnight at the end of that day, so 86400, not zero.
+int ReadOneTable(bool wantTrade, SessionRec &out[], int maxOut)
 {
-   g_sessCount = 0;
-   datetime now = TimeTradeServer();
-   MqlDateTime st;
-   TimeToStruct(now, st);
-   datetime midnight = (datetime)((long)now - (long)(st.hour * 3600 + st.min * 60 + st.sec));
-
-   for(int dow = 0; dow < 7 && g_sessCount < MAX_SESSIONS; dow++)
+   int n = 0;
+   for(int dow = 0; dow < 7 && n < maxOut; dow++)
    {
-      for(uint idx = 0; idx < 4 && g_sessCount < MAX_SESSIONS; idx++)
+      //  Indices are contiguous from zero; the first failure ends the day.
+      for(uint idx = 0; idx < 8; idx++)
       {
          datetime from = 0, to = 0;
-         if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, idx, from, to)) continue;
+         bool got = wantTrade
+                    ? SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, idx, from, to)
+                    : SymbolInfoSessionQuote(_Symbol, (ENUM_DAY_OF_WEEK)dow, idx, from, to);
+         if(!got) break;
+
          MqlDateTime f, t;
          TimeToStruct(from, f);
-         TimeToStruct(to, t);
-         int startSec = f.hour * 3600 + f.min * 60;
-         int endSec   = t.hour * 3600 + t.min * 60;
-         if(startSec == 0 && endSec == 0) continue;
-         g_sess[g_sessCount].dow      = dow;
-         g_sess[g_sessCount].startSec = startSec;
-         g_sess[g_sessCount].endSec   = (endSec == 0) ? 86400 : endSec;
-         g_sessCount++;
+         TimeToStruct(to,   t);
+         int sSec = f.hour * 3600 + f.min * 60;
+         int eSec = t.hour * 3600 + t.min * 60;
+         if(eSec == 0) eSec = 86400;             // 00:00 = midnight = end of day
+
+         if(n >= maxOut) return(n);
+         out[n].dow      = dow;
+         out[n].startSec = sSec;
+         out[n].endSec   = eSec;
+         n++;
       }
    }
+   return(n);
+}
+
+string DayName(int dow)
+{
+   switch(dow)
+   {
+      case 0: return("Sun");
+      case 1: return("Mon");
+      case 2: return("Tue");
+      case 3: return("Wed");
+      case 4: return("Thu");
+      case 5: return("Fri");
+      case 6: return("Sat");
+   }
+   return("?");
+}
+
+void DumpSessions(string label, SessionRec &tab[], int n)
+{
+   if(n == 0) { PrintFormat("OldMate %s: published table is empty", label); return; }
+   string line = "";
+   for(int i = 0; i < n && i < 8; i++)
+      line += StringFormat(" | %s %02d:%02d-%02d:%02d", DayName(tab[i].dow),
+                           tab[i].startSec / 3600, (tab[i].startSec % 3600) / 60,
+                           tab[i].endSec / 3600, (tab[i].endSec % 3600) / 60);
+   PrintFormat("OldMate %s: %d records%s", label, n, line);
+}
+
+void ReadSessions()
+{
+   g_sessQN = ReadOneTable(false, g_sessQ, MAX_SESSIONS);
+   g_sessTN = ReadOneTable(true,  g_sessT, MAX_SESSIONS);
    g_lastSession = TimeTradeServer();
+
+   //  Say it once, in the Experts log, so the reason for a status is never a
+   //  mystery: which table the broker actually publishes for this symbol.
+   DumpSessions("quote sessions", g_sessQ, g_sessQN);
+   DumpSessions("trade sessions", g_sessT, g_sessTN);
+   if(g_sessQN == 0 && g_sessTN == 0)
+      PrintFormat("OldMate: %s publishes no session table at all. MT5 does this for "
+                  "symbols that are not session-restricted - crypto, for example. "
+                  "The market is treated as open, and connection, trade mode and "
+                  "quote freshness still gate every send.", _Symbol);
 }
 
 datetime ServerNow()      { return(TimeTradeServer()); }
 
-bool IsOpenNow(datetime serverNow, datetime &untilEnd, datetime &nextOpen)
+bool SessionActive(SessionRec &tab[], int n, datetime serverNow, datetime &endAt)
 {
-   untilEnd = 0;
-   nextOpen = 0;
+   endAt = 0;
    MqlDateTime st;
    TimeToStruct(serverNow, st);
    int sec = st.hour * 3600 + st.min * 60 + st.sec;
 
    bool open = false;
-   for(int i = 0; i < g_sessCount; i++)
+   for(int i = 0; i < n; i++)
    {
-      if(g_sess[i].dow != st.day_of_week) continue;
-      if(sec >= g_sess[i].startSec && sec < g_sess[i].endSec)
-      {
-         open = true;
-         datetime end = (datetime)((long)serverNow - (long)sec + (long)g_sess[i].endSec);
-         if(untilEnd == 0 || end < untilEnd) untilEnd = end;
-      }
+      if(tab[i].dow != st.day_of_week) continue;
+      if(sec < tab[i].startSec || sec >= tab[i].endSec) continue;
+      datetime e = (datetime)((long)serverNow - (long)sec + (long)tab[i].endSec);
+      if(endAt == 0 || e < endAt) endAt = e;
+      open = true;
    }
-   if(open) return(true);
+   return(open);
+}
 
-   //  Next opening time within the coming week.
+bool SessionOpen(SessionRec &tab[], int n, datetime serverNow, datetime &untilEnd, datetime &nextOpen)
+{
+   untilEnd = 0;
+   nextOpen = 0;
+   if(SessionActive(tab, n, serverNow, untilEnd)) return(true);
+
+   MqlDateTime st;
+   TimeToStruct(serverNow, st);
+   int sec = st.hour * 3600 + st.min * 60 + st.sec;
    for(int add = 0; add < 8 && nextOpen == 0; add++)
    {
       int dow = (st.day_of_week + add) % 7;
-      for(int i = 0; i < g_sessCount; i++)
+      for(int i = 0; i < n; i++)
       {
-         if(g_sess[i].dow != dow) continue;
+         if(tab[i].dow != dow) continue;
          datetime base = (datetime)((long)serverNow - (long)sec + (long)add * 86400);
-         datetime s = (datetime)((long)base + (long)g_sess[i].startSec);
-         if(s > serverNow) { if(nextOpen == 0 || s < nextOpen) nextOpen = s; }
+         datetime s    = (datetime)((long)base + (long)tab[i].startSec);
+         if(s > serverNow && (nextOpen == 0 || s < nextOpen)) nextOpen = s;
       }
    }
    return(false);
 }
 
+//  Is the market quoting?  Quote table if the broker has one, otherwise the
+//  trade table, otherwise - no table published - not restricted, so yes.
+bool IsOpenNow(datetime serverNow, datetime &untilEnd, datetime &nextOpen)
+{
+   if(g_sessQN > 0)      return(SessionOpen(g_sessQ, g_sessQN, serverNow, untilEnd, nextOpen));
+   if(g_sessTN > 0)      return(SessionOpen(g_sessT, g_sessTN, serverNow, untilEnd, nextOpen));
+   untilEnd = 0; nextOpen = 0;
+   return(true);
+}
+
+//  May an order be sent right now, on the broker's own trading clock?
+bool TradeWindowOpen(datetime serverNow)
+{
+   if(g_sessTN == 0) return(true);            // not restricted
+   datetime endAt = 0;
+   return(SessionActive(g_sessT, g_sessTN, serverNow, endAt));
+}
 
 string HumanDelta(datetime from, datetime to)
 {
@@ -677,6 +757,7 @@ void RefreshMarket()
 
    bool connected = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
    bool tradeable = (g_f.tradeMode != SYMBOL_TRADE_MODE_DISABLED);
+   bool tradeWin  = TradeWindowOpen(ServerNow());
    bool stale     = false;
    if(g_f.lastQuote > 0 &&
       (long)TimeTradeServer() - (long)g_f.lastQuote > (long)(STALE_MINUTES * 60))
@@ -702,17 +783,6 @@ void RefreshMarket()
    {
       g_m.status = 4; g_m.text = "Trading unavailable"; g_m.colour = clrTomato;
    }
-   else if(g_sessCount == 0)
-   {
-      //  The broker publishes no session table for this symbol, which means it
-      //  is not session-restricted - not that we do not know. Saying so, and
-      //  saying why, is honest; blocking it forever made crypto untradeable.
-      //  Trade mode and quote freshness are still checked above, so a symbol
-      //  that is genuinely closed or stale still stops here.
-      g_m.status = 0;
-      g_m.text = "Market open (no session table)";
-      g_m.colour = clrLime;
-   }
    else if(!open)
    {
       g_m.status = 1;
@@ -728,9 +798,21 @@ void RefreshMarket()
    {
       g_m.status = 3; g_m.text = "Stale quote"; g_m.colour = clrOrange;
    }
+   else if(!tradeWin)
+   {
+      //  Quoting but not accepting orders. Sending here would be rejected by
+      //  the broker, so it is reported before anything is attempted.
+      g_m.status = 4;
+      g_m.text = "Trading window shut (quote only)";
+      g_m.colour = clrOrange;
+   }
    else
    {
-      g_m.status = 0; g_m.text = "Market open"; g_m.colour = clrLime;
+      g_m.status = 0;
+      if(g_sessQN > 0)      g_m.text = "Market open";
+      else if(g_sessTN > 0) g_m.text = "Market open (trade clock)";
+      else                  g_m.text = "Market open (no session table)";
+      g_m.colour = clrLime;
    }
 }
 
@@ -769,9 +851,17 @@ string SendBlocker(int idx)
       if(g_m.status == 1) return("market closed");
       if(g_m.status == 2) return("disconnected");
       if(g_m.status == 3) return("stale quote");
-      if(g_m.status == 4) return("trading unavailable");
-      return("market status unknown");
+      if(g_m.status == 4) return(g_m.text);
+      return(g_m.text);
    }
+
+   //  The broker can forbid one direction outright. Sending into that is a
+   //  guaranteed rejection, so it is named here rather than discovered later.
+   if(g_f.tradeMode == SYMBOL_TRADE_MODE_CLOSEONLY) return("broker is close-only");
+   if(g_f.tradeMode == SYMBOL_TRADE_MODE_LONGONLY && g_plan[idx].dir < 0)
+      return("broker allows buys only");
+   if(g_f.tradeMode == SYMBOL_TRADE_MODE_SHORTONLY && g_plan[idx].dir > 0)
+      return("broker allows sells only");
    if(NettingOppositeVolume(g_plan[idx].dir) > 0.0) return("netting conflict");
    if(!InpBypassRisk && OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return("lane risk cap");
    return("");
@@ -3093,8 +3183,10 @@ void DrawPanel()
            "   STRT " + ReadScoreText(2), clrGray,
         "How often each reading was on the right side, counted from the record. A * means the bounded tweak stopped it counting after it fell below a coin flip.");
    PAdd(0, " " + g_recNote + "  |  Tweak: " + (InpTweakArm ? "armed" : "off") +
-           "  |  Last bar " + TimeToString(ServerNow(), TIME_MINUTES) + " server", clrGray,
-        "The record is a file beside the terminal's data folder. It only ever watches.");
+           "  |  Last bar " + TimeToString(ServerNow(), TIME_MINUTES) +
+           " server  |  build " + EA_BUILD, clrGray,
+        "The record is a file beside the terminal's data folder. It only ever watches. "
+        "The build stamp tells you which version is on the chart.");
 
    g_panelH = PRender(0, PANEL_PREFIX, PANEL_X, PANEL_Y);
    g_panelW = PWidth(0) * (int)MathRound(FONT_SIZE * 0.80) + 2 * PANEL_PAD;
@@ -3311,6 +3403,14 @@ int OnInit()
    if(!TimeframeAllowed((ENUM_TIMEFRAMES)Period()))
       Print("OldMate: this chart is ", EnumToString((ENUM_TIMEFRAMES)Period()),
             ". Only M5, M15 and M30 are supported. Nothing will be read, planned or sent.");
+
+   //  One line at attach that answers "why does it say that?" without a
+   //  screenshot, and names the build so a report can be matched to code.
+   PrintFormat("OldMate build %s on %s %s: quote sessions %d, trade sessions %d, "
+               "trade mode %d, connected %d, status '%s'",
+               EA_BUILD, _Symbol, EnumToString((ENUM_TIMEFRAMES)Period()),
+               g_sessQN, g_sessTN, g_f.tradeMode,
+               (int)TerminalInfoInteger(TERMINAL_CONNECTED), g_m.text);
 
    return(INIT_SUCCEEDED);
 }

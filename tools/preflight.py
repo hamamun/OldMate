@@ -170,7 +170,7 @@ DoubleToString IntegerToString TimeToString StringToTime CharToString
 NormalizeDouble Print PrintFormat Comment Alert
 ObjectCreate ObjectDelete ObjectFind ObjectSetInteger ObjectSetString ObjectSetDouble
 ObjectGetInteger ObjectGetDouble ObjectGetString ObjectsDeleteAll ChartRedraw ChartGetInteger ChartWidthInPixels
-ObjectsTotal ObjectName ObjectGetTimeByValue ObjectFind
+ObjectsTotal ObjectName SymbolInfoSessionQuote SymbolInfoSessionTrade ObjectGetTimeByValue ObjectFind
 FileOpen FileClose FileWrite FileRead FileWriteString FileReadString FileFlush FileSeek
 FileIsEnding FileIsLineEnding
 CopyClose CopyHigh CopyLow CopyRates CopyTime CopyTickVolume

@@ -1,6 +1,6 @@
 # OldMate — the plan, as built
 
-**Status: built. `OldMate.mq5` exists, preflight-clean, 3 348 lines.** It has not yet been
+**Status: built. `OldMate.mq5` exists, preflight-clean, 3 448 lines, build 1.08.** It has not yet been
 compiled in MetaEditor or run on a demo account — that is the only step left, and section 17
 says exactly how to judge it.
 
@@ -373,6 +373,23 @@ Two more of the same class were found by sweeping for the pattern rather than wa
 the next compile: every `datetime` subtraction in the file (five of them) is now done in
 `long`, and the enum ternary in `OnInit` is cast explicitly. The checker was also taught the
 `ENUM_*` return type, which it had been misreading as an unknown function.
+
+**The real cause of `Market status unknown` on every chart.** MT5 publishes two session
+tables per symbol and they answer different questions: the **quote** table says when the broker
+is quoting (is the market open), the **trade** table says when orders are accepted. The reader
+only ever asked for trade sessions. Plenty of brokers publish quote sessions and leave the trade
+table empty - so `g_sessCount` was zero on every symbol, and the status fell through to unknown,
+which `SendPlan` refuses. It was never crypto-specific; it was every chart, as reported.
+
+Now both tables are read and kept apart: quote sessions decide open/closed, trade sessions
+decide whether an order may be sent. If the trade clock is shut while quotes flow (gold at
+23:00, for instance) the status says `Trading window shut (quote only)` instead of letting the
+broker reject the order. If neither table exists the symbol is not session-restricted and reads
+`Market open (no session table)`. Close-only, long-only and short-only trade modes are named in
+the same place, because a rejected order should be a refusal we predicted, not one we discovered.
+
+The log now prints the evidence at attach - build, counts from both tables, trade mode and the
+resulting status - and the panel carries a `build` stamp, so a report can be matched to code.
 
 **Field question answered: why no trade on M30 with `2/3 BUY`.** There were two
 independent blockers, and the panel was hiding both.
