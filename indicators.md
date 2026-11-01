@@ -32,6 +32,26 @@ familiar ideas. What changed is that the numbers behind them no longer need a hu
 
 ## 2. The three chosen readings
 
+> **What the measurements changed.** This section originally named three readings as
+> independent voters. `tools/selftest.py` showed they agreed 99-100% whenever all three spoke -
+> three names for one measurement - and `tools/choose_readings.py` found that the seven
+> conventional candidates collapse into exactly **two** families: continuation (MACD-V,
+> directional movement, structure break, efficiency direction, mutually 95-100% agreeing) and
+> reversion (RSI, Stochastic, envelope position, mutually 100% agreeing), with **0% agreement
+> between the families**.
+>
+> `tools/combine_test.py` then showed the consequence, across five kinds of market: every fixed
+> combination fails somewhere (a fixed trio scored 29.5% on a mean-reverting market; the
+> reversion-only rule scored 23.3% on drift-with-pullbacks), while a **memory-conditional** rule
+> was the only one never below a coin flip anywhere - 51.3% to 80.8% across the five markets.
+>
+> So the three readings below are kept, but they are not treated as three equal votes. One
+> continuation reading, one structure/participation reading and one reversion reading, with
+> **market memory choosing which family decides**. That is `DecideSignal` in the file.
+>
+> A consequence worth stating: a unanimous `3/3` score is **impossible by construction**, and
+> the self-test asserts that it stays impossible rather than letting a faked one appear.
+
 ### 2.1 Momentum — MACD, in its volatility-normalised form (MACD-V)
 
 **What it is.** Gerald Appel's MACD — the gap between a fast and a slow exponential average —
@@ -117,8 +137,11 @@ squeeze, which is the best-understood thing this family measures.
    is genuine compression, the 95th genuine expansion — rather than an arbitrary "narrow" or
    "wide".
 3. **Volatility is a state, not a signal.** A wide band in a wild market means a different
-   thing from a wide band in a quiet one, and the CONDITION column keeps that distinction
-   visible rather than folding it into the vote.
+   thing from a wide band in a quiet one; the REGIME cell keeps that distinction visible
+   instead of folding it into the vote.
+4. **This reading fades.** Stretched high votes down, stretched low votes up. It is the only
+   reading that disagrees with the other two, and measurement says that is exactly what makes
+   it worth having - but only when market memory says the series is ranging.
 
 Sources:
 - Percentile-based band-width regimes and normalisation: <https://www.tradingview.com/script/23tnzSdb/>
@@ -236,7 +259,7 @@ turns into a curve-fitted one.
 | **Identity** | 12 / 26 / 9 for MACD, 26 for its volatility window, 14 for directional movement, 3-bar swing confirmation | **fixed and canonical.** These lengths *are* the instrument the owner can see on their own chart. Changing them silently would make the panel describe a chart nobody can look at, and would end the comparison with Automate |
 | **Unit** | the size of an ordinary bar, one tick, this hour's median spread | **always measured from this symbol.** This is the only reason one file behaves sanely on gold at 3,500 and on EUR/USD at 1.08 |
 | **Threshold** | what counts as stretched, strong, quiet, or far enough apart to vote | **measured from the reading's own distribution**, as a percentile, with the sample count shown. This is what removes every tuning input |
-| **Speed** | how fast a smoothing reacts | **measured from the cleanliness of the move** (efficiency ratio), inside fixed documented bounds |
+| **Speed** | how fast a smoothing reacts | **fixed**, deliberately - adapting it would change the identity of the indicator the owner can see. The adaptivity lives in the thresholds and the calibration window instead |
 
 Two things this rule forbids, both of which would otherwise sneak in:
 
@@ -363,7 +386,53 @@ forecast method Automate tested and refused, and nothing here re-introduces it.
 
 ---
 
-## 10. Sources
+## 10. The measurement record
+
+Every number below is printed by a script in `tools/` and can be reproduced.
+
+### 10.1 The arithmetic, checked (`tools/selftest.py`, ALL CHECKS PASSED)
+
+| Check | Result |
+|---|---|
+| Wilder seed is the simple average, step is 1/n | verified against hand arithmetic |
+| Wilder is slower than an EMA of the same length | 3.1250 vs 3.5000 after the first step |
+| True range counts a gap | 10.5 where high-minus-low says 1.0 |
+| MACD-V is scale-free | 0.00% spread between a 100-price series and the same shape at 3 500 |
+| a raw MACD is not | 35× apart on the same two series - the problem MACD-V fixes |
+| a 5% threshold fires 5% of the time | 5.29% (envelope position), 5.46% (`|MACD-V|`) |
+| memory separates the three series types | random walk 0.548, persistent 0.696, reverting 0.412 |
+| no reading depends on a later bar | truncated and full series produce identical votes |
+
+**Two real bugs were caught before any MQL5 existed:** DFA and rescaled range were being run on
+prices instead of increments (every series scored H≈1.4 and every memory label read `Unclear`),
+and a percentile was being applied to a raw random walk (firing 12% instead of 5%). Both would
+have shipped as convincing-looking numbers.
+
+### 10.2 The families (`tools/choose_readings.py`)
+
+| Pair | Agreement when both vote | Reading |
+|---|---|---|
+| MACD-V / directional movement | 100.0% | one family |
+| MACD-V / efficiency direction | 100.0% | one family |
+| RSI / Stochastic | 100.0% | one family |
+| RSI / envelope position | 100.0% | one family |
+| continuation / reversion | 0.0% | opposites |
+
+### 10.3 The rule (`tools/combine_test.py`)
+
+| Market | fixed trio, 2 of 3 | reversion only | **memory-conditional** |
+|---|---|---|---|
+| random walk | 50.3% | 49.5% | **51.5%** |
+| steady drift | 65.2% | 48.9% | **66.5%** |
+| momentum | 57.1% | 44.1% | **55.8%** |
+| mean-reverting | 29.5% | 69.5% | **51.3%** |
+| drift + pullbacks | 81.9% | 23.3% | **80.8%** |
+
+50% is a coin flip. Only the last column never goes below it.
+
+---
+
+## 11. Sources
 
 - Spiroglou, A. — *MACD-V: Volatility Normalised Momentum* (2022). Dow Award, NAAIM Founders
   Award. <https://www.benzinga.com/pressreleases/22/05/p27046755/>
