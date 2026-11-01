@@ -20,7 +20,7 @@ Open:
  MT V1.00 | XAUUSDm | Metal | OPEN | 2026.11.01 11:57:34
 ```
 
-Closed:
+**Note — when closed, the last cell shows the next opening time instead of the running clock:**
 
 ```text
  MT V1.00 | XAUUSDm | Metal | close | Open at 2026.11.01 11:57:34
@@ -36,13 +36,10 @@ Closed:
 
 56 characters open, 65 closed — **about 448 and 520 px** at 10 pt.
 
-The box is sized to the **widest** of the two states, so it never jumps or resizes as the market
-shuts. The date and time are fixed width, so nothing shifts as the seconds change.
+The box is sized to the **widest** of the two states, so it never resizes when the market shuts.
+The date and time are fixed width, so nothing shifts as the seconds change.
 
-While open, the clock is the sync check: it ticks every second while the terminal is connected and
-freezes when it is not, so a stopped clock beside `OPEN` says the panel is reading stale data.
-
-If the broker publishes no table, there is no opening time to count to, and the cell says so
+If the broker publishes no table there is no opening time to count to, and the cell says so
 rather than inventing one:
 
 ```text
