@@ -113,22 +113,29 @@ print("=" * 70)
 print("ARITY  (calls to our own functions)")
 print("=" * 70)
 def arity(params):
+    """(required, maximum). A parameter with '=' is optional."""
     if params.strip() in ("", "void"):
-        return 0
-    depth, n = 0, 1
+        return 0, 0
+    parts, depth, cur = [], 0, ""
     for ch in params:
         if ch in "([":
             depth += 1
         elif ch in ")]":
             depth -= 1
-        elif ch == "," and depth == 0:
-            n += 1
-    return n
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    maximum = len(parts)
+    required = sum(1 for x in parts if "=" not in x)
+    return required, maximum
 
 
 bad_arity = []
 for name, plist in defs.items():
-    want = arity(plist[0])
+    want = arity(plist[0])  # (required, maximum)
     for m in re.finditer(r"(?<![\w.])" + name + r"\s*\(", s):
         start = m.end()
         depth, n = 1, 0
@@ -143,8 +150,9 @@ for name, plist in defs.items():
             i += 1
         got = 0 if s[start:i - 1].strip() == "" else n + 1
         line = s[:m.start()].count("\n") + 1
-        if got != want:
-            bad_arity.append(f"{name} at line {line}: got {got}, expected {want}")
+        lo, hi = want
+        if not (lo <= got <= hi):
+            bad_arity.append(f"{name} at line {line}: got {got}, expects {lo}-{hi}")
 chk("every call to our own functions has the right number of arguments",
     not bad_arity, "; ".join(bad_arity[:6]))
 
@@ -161,7 +169,7 @@ StringTrimRight StringConcatenate
 DoubleToString IntegerToString TimeToString StringToTime CharToString
 NormalizeDouble Print PrintFormat Comment Alert
 ObjectCreate ObjectDelete ObjectFind ObjectSetInteger ObjectSetString ObjectSetDouble
-ObjectGetInteger ObjectGetDouble ObjectGetString ObjectsDeleteAll ChartRedraw
+ObjectGetInteger ObjectGetDouble ObjectGetString ObjectsDeleteAll ChartRedraw ChartGetInteger ChartWidthInPixels
 FileOpen FileClose FileWrite FileRead FileWriteString FileReadString FileFlush FileSeek
 FileIsEnding FileIsLineEnding
 CopyClose CopyHigh CopyLow CopyRates CopyTime CopyTickVolume
@@ -185,7 +193,10 @@ Volume VolumeCurrent PriceOpen StopLoss TakeProfit Magic Symbol Profit Swap
 PositionType OrderType TimeSetup Ticket
 """.split())
 
-called = set(re.findall(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", s))
+#  Preprocessor lines are not code: '#define LINE_H (FONT_SIZE + 9)' must not
+#  look like a call to a function called LINE_H.
+no_pp = re.sub(r"^[ \t]*#.*$", "", s, flags=re.M)
+called = set(re.findall(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", no_pp))
 unknown = sorted(c for c in called
                  if c not in defs and c not in BUILTIN
                  and c not in {"if", "for", "while", "switch", "return", "sizeof", "else"})
