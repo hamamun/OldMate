@@ -1,6 +1,6 @@
 # OldMate — the plan, as built
 
-**Status: built. `OldMate.mq5` exists, preflight-clean, 3 097 lines.** It has not yet been
+**Status: built. `OldMate.mq5` exists, preflight-clean, 3 126 lines.** It has not yet been
 compiled in MetaEditor or run on a demo account — that is the only step left, and section 17
 says exactly how to judge it.
 
@@ -357,6 +357,21 @@ they are the argument for reading code after writing it:
 
 The checker was extended to catch the "field does not exist" class automatically — and caught
 the compile error on its first run.
+
+**The first real compile found ten errors, all fixed.** Reported from MetaEditor on
+2026-11-01 and repaired the same day:
+
+| Compiler said | Real cause | Fix |
+|---|---|---|
+| `'g_spr' - invalid array access`, `parameter passed as reference` | a row of a 2-D array cannot be passed by reference | the row is copied into a 1-D array first |
+| `undeclared identifier 'SYMBOL_TRADE_DISABLED'` | that is the MQL4 name | `SYMBOL_TRADE_MODE_DISABLED` |
+| `cannot convert enum` at the limit order | two `datetime` values were added; MQL5 will not | add in `long`, cast back once |
+| `undeclared identifier 'SelectByTicket'` (×3) | `COrderInfo` has no `SelectByTicket` in this build | pending orders now read through the built-in `OrderSelect`/`OrderGet*` calls, with six small accessors of our own |
+
+Two more of the same class were found by sweeping for the pattern rather than waiting for
+the next compile: every `datetime` subtraction in the file (five of them) is now done in
+`long`, and the enum ternary in `OnInit` is cast explicitly. The checker was also taught the
+`ENUM_*` return type, which it had been misreading as an unknown function.
 
 **Still to do, and only this:**
 
