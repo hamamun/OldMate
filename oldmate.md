@@ -1,6 +1,6 @@
 # OldMate — the plan, as built
 
-**Status: built. `OldMate.mq5` exists, preflight-clean, 3 297 lines.** It has not yet been
+**Status: built. `OldMate.mq5` exists, preflight-clean, 3 348 lines.** It has not yet been
 compiled in MetaEditor or run on a demo account — that is the only step left, and section 17
 says exactly how to judge it.
 
@@ -305,7 +305,7 @@ graded calls and is right less than 45 % of the time, it stops counting toward a
 It is marked with `*`, written to the record, and never re-promotes itself. It cannot promote
 anything and cannot touch risk.
 
-## 11. The nine switches
+## 11. The ten switches
 
 | Input | Default | What it does |
 |---|---|---|
@@ -318,6 +318,7 @@ anything and cannot touch risk.
 | `Diary details` | on | the second panel |
 | `Tweak` | off | arms the bounded demotion |
 | `Minimum lot` | off | clamp a size up to the broker minimum instead of refusing |
+| `Bypass risk budget` | off | **the wider override**: a minimum lot larger than the budget is no longer refused, and the 1.50 % total cap is released. The panel shows `RISK BYPASS ON`, and every order still reports what it actually risks |
 
 No period, band, threshold or session time is ever an input.
 

@@ -28,7 +28,7 @@
 #include <Trade\SymbolInfo.mqh>
 
 //====================================================================
-//  SWITCHES - nine, all on/off, all safe at their default forever
+//  SWITCHES - ten, all on/off, all safe at their default forever
 //====================================================================
 input bool   InpAutoTrade    = true;   // Autotrading (master switch)
 input bool   InpAllowM5      = true;   // Allow M5 autotrade
@@ -39,6 +39,7 @@ input bool   InpTp1Tp2       = true;   // TP1 partial + TP2
 input bool   InpDiaryDetails = true;   // Diary details
 input bool   InpTweakArm     = false;  // Tweak (arm one bounded self-tweak)
 input bool   InpMinLot       = false;  // Minimum lot
+input bool   InpBypassRisk   = false;  // Bypass risk budget
 
 //====================================================================
 //  CONSTANTS
@@ -772,7 +773,7 @@ string SendBlocker(int idx)
       return("market status unknown");
    }
    if(NettingOppositeVolume(g_plan[idx].dir) > 0.0) return("netting conflict");
-   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return("lane risk cap");
+   if(!InpBypassRisk && OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return("lane risk cap");
    return("");
 }
 
@@ -1928,10 +1929,15 @@ double CalcLot(int dir, double entry, double sl, string &why, string &diag)
 
    double budget = AccountInfoDouble(ACCOUNT_EQUITY) * RISK_PCT / 100.0;
    double lots   = budget / lossPerLot;
-   diag = StringFormat("budget $%.2f (%.2f%% of $%.2f); one lot risks $%.2f at this stop; "
+   double riskMoney = lossPerLot * lots;
+   diag = StringFormat("risks $%.2f on this stop (budget $%.2f = %.2f%% of equity); "
                        "min lot %.2f risks $%.2f",
-                       budget, RISK_PCT, AccountInfoDouble(ACCOUNT_EQUITY),
-                       lossPerLot, g_f.volMin, lossPerLot * g_f.volMin);
+                       riskMoney, budget, RISK_PCT, g_f.volMin,
+                       lossPerLot * g_f.volMin);
+   if(riskMoney > budget * 1.0001)
+      diag += StringFormat("  -  OVER BUDGET by $%.2f (%.1f%% of equity at risk)",
+                           riskMoney - budget,
+                           100.0 * riskMoney / AccountInfoDouble(ACCOUNT_EQUITY));
 
    double step = g_f.volStep;
    double mn   = g_f.volMin;
@@ -1940,7 +1946,11 @@ double CalcLot(int dir, double entry, double sl, string &why, string &diag)
 
    if(lots < mn)
    {
-      if(!InpMinLot) { why = "risk budget cannot buy the minimum lot"; return(0.0); }
+      //  Refuse by default.  Minimum lot clamps up; Bypass risk budget does the
+      //  same and also releases the total-exposure cap, for an owner who has
+      //  decided to see the trade rather than the refusal.
+      if(!InpMinLot && !InpBypassRisk)
+      { why = "risk budget cannot buy the minimum lot"; return(0.0); }
       lots = mn;
    }
    if(lots > mx) lots = MathFloor(mx / step + 1e-8) * step;
@@ -2029,7 +2039,7 @@ bool BuildPlan(int idx)
    }
 
    //  Total exposure cap across lanes.
-   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9)
+   if(!InpBypassRisk && OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9)
    {
       g_plan[idx].note = "WAIT: lane risk cap reached";
       g_plan[idx].diag = StringFormat("already open %.2f%% + this idea %.2f%% > cap %.2f%%",
@@ -2190,6 +2200,7 @@ bool BuildPlan(int idx)
                                   : SnapUp(entry - 0.5 * tpDist, tick);
    g_plan[idx].lot    = lot;
    g_plan[idx].note   = "";
+   g_plan[idx].diag   = sDiag;
 
    g_lane[idx].reachPct = reach;
    g_lane[idx].reachN   = reachN;
@@ -2390,7 +2401,7 @@ bool SendPlan(int idx)
    //  Netting: two lanes may not hold opposite positions.
    if(NettingOppositeVolume(g_plan[idx].dir) > 0.0) return(false);
 
-   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return(false);
+   if(!InpBypassRisk && OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return(false);
 
    g_trade.SetExpertMagicNumber(LaneMagic(idx));
    g_trade.SetDeviationInPoints(20);
@@ -2776,17 +2787,30 @@ int PRender(int b, string prefix, int x, int y)
    return(h);
 }
 
+//  Delete by NAME PREFIX, not by remembering which index we drew last.
+//  A chart-wide sweep catches:
+//    * leftovers from an earlier run of this EA,
+//    * leftovers after a crash, when OnDeinit never finished,
+//    * any name we did not anticipate.
+//  It is idempotent, so running it at attach and at detach is always safe.
+int DeleteByPrefix(string prefix)
+{
+   int removed = 0;
+   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+   {
+      string nm = ObjectName(0, i, -1, -1);
+      if(nm == "") continue;
+      if(StringFind(nm, prefix) != 0) continue;
+      if(ObjectDelete(0, nm)) removed++;
+   }
+   return(removed);
+}
+
 void PanelRemoveAll()
 {
-   for(int i = 0; i < 200; i++)
-   {
-      string name = PANEL_PREFIX + IntegerToString(i);
-      if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-      string dn = DETAIL_PREFIX + IntegerToString(i);
-      if(ObjectFind(0, dn) >= 0) ObjectDelete(0, dn);
-   }
-   BoxDelete(PANEL_PREFIX);
-   BoxDelete(DETAIL_PREFIX);
+   DeleteByPrefix(PANEL_PREFIX);
+   DeleteByPrefix(DETAIL_PREFIX);
+   ChartRedraw();
 }
 
 //------------------------------------------------------------------
@@ -2911,6 +2935,13 @@ void DrawPanel()
    PAdd(0, " " + AutoTradeText(), AutoTradeColour(),
         "Autotrading ON is this EA's permission. MT5's own Algo Trading button has a veto of its own.");
 
+   if(InpBypassRisk)
+      PAdd(0, StringFormat(" RISK BYPASS ON - a size may exceed the %.2f%% budget and the %.2f%% total cap",
+                           RISK_PCT, RISK_TOTAL_PCT), clrOrange,
+           "Bypass risk budget is armed. Sizing still uses the terminal's own money "
+           "calculation, and every order reports what it actually risks on hover - but a "
+           "minimum lot that is larger than the budget is no longer refused.");
+
    //  ---- out of range: say it, and stop ------------------------------
    if(!TimeframeAllowed((ENUM_TIMEFRAMES)Period()))
    {
@@ -2974,9 +3005,13 @@ void DrawPanel()
       string tip = "WAIT is not a failure: it is the EA refusing to invent a level it cannot measure.";
       if(!g_plan[i].ok && g_plan[i].diag != "")
          tip = g_plan[i].note + "  ||  " + g_plan[i].diag;
-      else if(g_plan[i].ok && SendBlocker(i) != "")
-         tip = "The plan is finished, but it cannot be sent: " + SendBlocker(i) + ". "
-               "It will be sent on the first bar where nothing is in the way.";
+      else if(g_plan[i].ok)
+      {
+         tip = (SendBlocker(i) == "")
+               ? "This plan can be sent. " + g_plan[i].diag
+               : "The plan is finished but cannot be sent yet: " + SendBlocker(i) +
+                 ". " + g_plan[i].diag;
+      }
       if(!g_lane[i].ready)
          tip = StringFormat("This lane needs %d closed bars and the terminal has %d. Nothing is claimed until it has them.",
                             g_lane[i].needBars, g_lane[i].haveBars);
@@ -3264,8 +3299,14 @@ int OnInit()
    RecordLoad();
    ReconcileAll();
 
+   //  A previous instance may have been removed without finishing its cleanup.
+   //  Clear the chart before drawing over it.
+   DeleteByPrefix(PANEL_PREFIX);
+   DeleteByPrefix(DETAIL_PREFIX);
+
    EventSetTimer(1);
    DrawPanel();
+   ChartRedraw();
 
    if(!TimeframeAllowed((ENUM_TIMEFRAMES)Period()))
       Print("OldMate: this chart is ", EnumToString((ENUM_TIMEFRAMES)Period()),
@@ -3277,13 +3318,23 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   PanelRemoveAll();
+
+   //  Clean up first and unconditionally: whatever happens next, the chart
+   //  should not be left with a box floating over it.
+   int gone = 0;
+   gone += DeleteByPrefix(PANEL_PREFIX);
+   gone += DeleteByPrefix(DETAIL_PREFIX);
    ChartRedraw();
+
    if(g_recH != INVALID_HANDLE)
    {
       FileClose(g_recH);
       g_recH = INVALID_HANDLE;
    }
+
+   //  A named reason, so a report of "abnormal termination" can be read
+   //  against what the EA thought was happening.
+   PrintFormat("OldMate deinit: reason %d, %d chart objects removed", reason, gone);
 }
 
 void OnTick()
