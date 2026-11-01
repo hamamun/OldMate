@@ -1,6 +1,6 @@
 # OldMate — conventional autotrading for MT5
 
-**Status: built.** `OldMate.mq5` — 3 122 lines, preflight-clean, arithmetic verified by a
+**Status: built.** `OldMate.mq5` — 3 097 lines, preflight-clean, arithmetic verified by a
 Python reference. **Not yet compiled in MetaEditor and not yet run on a demo account.** That is
 the only step left, and [oldmate.md](oldmate.md) section 13 says exactly how to judge it.
 
@@ -60,7 +60,7 @@ rule never below a coin flip was the one that lets **market memory choose the fa
 ```
 
 `SCORE` is **agreement, never a win rate**. The percentage beside a call is the share of
-same-grade past situations that reached their measured target, with its sample size.
+replayed past situations that reached their measured target, with its sample size.
 
 ## The nine switches, all on/off
 

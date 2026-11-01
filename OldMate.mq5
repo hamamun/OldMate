@@ -45,7 +45,6 @@ input bool   InpMinLot       = false;  // Minimum lot
 //  CONSTANTS
 //====================================================================
 #define EA_NAME            "OLD MATE"
-#define EA_VERSION         "1.0"
 #define PANEL_PREFIX       "OM_"
 #define DETAIL_PREFIX      "OMD_"
 #define PANEL_X            12
@@ -63,13 +62,11 @@ input bool   InpMinLot       = false;  // Minimum lot
 #define SPREAD_SAMPLES     240
 
 //  Reading / calibration windows.  Morphology, not user settings.
-#define CAL_BARS           600     // bars the calibration windows are drawn from
 //  The percentile window is per lane (LaneRankWindow): 300 / 400 / 500 bars,
 //  because a scalper must adapt within an hour and an intraday lane should
 //  reflect the session.  It is morphology, not a user setting.
 #define PCT_MIN            60      // minimum samples before a percentile speaks
 #define MEM_BARS           320     // bars analysed for market memory
-#define MEM_RECALC_BARS    4       // memory recomputed every N closed bars
 #define SEED_BARS          900     // closed bars loaded per lane
 
 //  Canonical indicator identity.  These lengths ARE the indicators the owner
@@ -78,8 +75,6 @@ input bool   InpMinLot       = false;  // Minimum lot
 #define MACD_SLOW          26
 #define MACD_SIGNAL        9
 #define DMI_PERIOD         14
-#define RSI_PERIOD         14
-#define STOCH_PERIOD       14
 #define BAND_PERIOD        20
 #define BAND_MULT          2.0
 
@@ -104,7 +99,6 @@ input bool   InpMinLot       = false;  // Minimum lot
 #define REPLAY_BARS        400
 #define TP_COST_X          2.0     // target must clear this many spreads
 #define MAX_SPREAD_GATE    3.0
-#define FWD_BARS           4       // the horizon the readings are graded against
 #define DURA_BARS          3       // "still standing this many bars on"
 #define MIN_DURA_SAMPLES   12
 #define TP1_FRACTION       0.50    // share closed at TP1
@@ -146,9 +140,7 @@ struct SymbolFacts
 struct AssetProfile
 {
    int     cls;
-   double  warmupBars;
-   double  spreadGateX;
-   double  deadbandX;      // deadband multiplier, in units of an ordinary bar
+   double  spreadGateX;    // this class's spread gate, as a multiple of the hour's median
    double  stopBufferTicks;
 };
 
@@ -222,6 +214,7 @@ struct LaneState
    int      tradedSignal;
    bool     armed;
    bool     tp1Done;
+   double   tp1Price;   // the TP1 this trade was opened with
    double   origRisk;
    double   openLots;
 };
@@ -313,12 +306,6 @@ int           g_runPrev[LANE_COUNT];
 //+------------------------------------------------------------------+
 //|  Small text helpers                                               |
 //+------------------------------------------------------------------+
-string Spaces(int n)
-{
-   string s = "";
-   for(int i = 0; i < n; i++) s += " ";
-   return(s);
-}
 
 string Pad(string text, int width)
 {
@@ -328,13 +315,6 @@ string Pad(string text, int width)
    return(s);
 }
 
-string PadL(string text, int width)
-{
-   string s = text;
-   while(StringLen(s) < width) s = " " + s;
-   if(StringLen(s) > width) s = StringSubstr(s, 0, width);
-   return(s);
-}
 
 string Upper(string s)
 {
@@ -342,10 +322,6 @@ string Upper(string s)
    return(s);
 }
 
-string Num(double v, int digits)
-{
-   return(DoubleToString(v, digits));
-}
 
 //+------------------------------------------------------------------+
 //|  Statistics used everywhere: median, MAD, percentile rank.        |
@@ -365,16 +341,6 @@ double MedianOf(double &src[], int n)
    return(m);
 }
 
-double MedianAbsDev(double &src[], int n)
-{
-   if(n <= 0) return(0.0);
-   double med = MedianOf(src, n);
-   double dev[];
-   ArrayResize(dev, n);
-   for(int i = 0; i < n; i++) dev[i] = MathAbs(src[i] - med);
-   double m = MedianOf(dev, n);
-   return(m);
-}
 
 //  Percentile rank 0..100 of value among the valid entries of hist.
 //  Empirical, with a minimum sample count.  When the count is short the
@@ -527,19 +493,18 @@ int ClassifySymbol()
 
 void ApplyProfile(int cls)
 {
-   g_base.cls            = cls;
-   g_base.warmupBars     = 300;
-   g_base.spreadGateX    = MAX_SPREAD_GATE;
-   g_base.deadbandX      = 1.0;
+   g_base.cls             = cls;
+   g_base.spreadGateX     = MAX_SPREAD_GATE;
    g_base.stopBufferTicks = 1.0;
 
-   if(cls == A_FOREX)  { g_base.spreadGateX = 3.0;  g_base.warmupBars = 300; }
-   if(cls == A_METAL)  { g_base.spreadGateX = 3.5;  g_base.warmupBars = 300; g_base.stopBufferTicks = 1.5; }
-   if(cls == A_INDEX)  { g_base.spreadGateX = 4.0;  g_base.warmupBars = 300; }
-   if(cls == A_ENERGY) { g_base.spreadGateX = 4.5;  g_base.warmupBars = 320; }
-   if(cls == A_CRYPTO) { g_base.spreadGateX = 6.0;  g_base.warmupBars = 400; g_base.deadbandX = 1.2; }
-   if(cls == A_STOCK)  { g_base.spreadGateX = 5.0;  g_base.warmupBars = 320; }
-   if(cls == A_OTHER)  { g_base.spreadGateX = MAX_SPREAD_GATE; g_base.warmupBars = 340; }
+   //  A class may raise a floor or set a gate.  It never changes the strategy.
+   if(cls == A_FOREX)  g_base.spreadGateX = 3.0;
+   if(cls == A_METAL)  { g_base.spreadGateX = 3.5; g_base.stopBufferTicks = 1.5; }
+   if(cls == A_INDEX)  g_base.spreadGateX = 4.0;
+   if(cls == A_ENERGY) g_base.spreadGateX = 4.5;
+   if(cls == A_CRYPTO) g_base.spreadGateX = 6.0;
+   if(cls == A_STOCK)  g_base.spreadGateX = 5.0;
+   if(cls == A_OTHER)  g_base.spreadGateX = MAX_SPREAD_GATE;
 
    g_p = g_base;
 }
@@ -552,11 +517,11 @@ void SampleSpread()
    if(g_f.ask <= 0.0 || g_f.bid <= 0.0) return;
    MqlDateTime st;
    TimeToStruct(TimeTradeServer(), st);
-   if(g_sprN[st.hour] < SPREAD_SAMPLES)
-   {
-      g_spr[st.hour][g_sprN[st.hour]] = (g_f.ask - g_f.bid) / g_f.point;
-      g_sprN[st.hour]++;
-   }
+   //  A rolling ring, so an hour's baseline keeps refreshing instead of
+   //  freezing after its first 240 samples.
+   int slot = g_sprN[st.hour] % SPREAD_SAMPLES;
+   g_spr[st.hour][slot] = (g_f.ask - g_f.bid) / g_f.point;
+   if(g_sprN[st.hour] < SPREAD_SAMPLES) g_sprN[st.hour]++;
 }
 
 double SpreadBaseline(int hour, int &samples)
@@ -725,6 +690,12 @@ void RefreshMarket()
    {
       g_m.status = 4; g_m.text = "Trading unavailable"; g_m.colour = clrTomato;
    }
+   else if(g_sessCount == 0)
+   {
+      //  No published session table is not a closure. Reporting "closed" here
+      //  would be exactly the false report the rules forbid.
+      g_m.status = 5; g_m.text = "Market status unknown"; g_m.colour = clrSilver;
+   }
    else if(!open)
    {
       g_m.status = 1;
@@ -739,10 +710,6 @@ void RefreshMarket()
    else if(stale)
    {
       g_m.status = 3; g_m.text = "Stale quote"; g_m.colour = clrOrange;
-   }
-   else if(g_sessCount == 0)
-   {
-      g_m.status = 5; g_m.text = "Market status unknown"; g_m.colour = clrSilver;
    }
    else
    {
@@ -1448,13 +1415,14 @@ void RecordLoad()
 
       if(kind == "CALL")
       {
-         int outcome = (int)StringToInteger(p[5]);
+         //  time,lane,CALL,grade,hit,read1,read2,read3,dir
+         int outcome = (int)StringToInteger(p[4]);
          int idx = (outcome > 0) ? 0 : ((outcome < 0) ? 1 : 2);
          g_allS[lane][idx]++;
          if(t >= today) g_todayS[lane][idx]++;
-         for(int r = 0; r < 3 && 4 + r < n; r++)
+         for(int r = 0; r < 3 && 5 + r < n; r++)
          {
-            int rv = (int)StringToInteger(p[4 + r]);
+            int rv = (int)StringToInteger(p[5 + r]);
             if(rv == 0) continue;
             g_readN[lane][r]++;
             if(rv > 0) g_readHit[lane][r]++;
@@ -1489,7 +1457,21 @@ void PendCall(int idx, int dir, int vm, int vp, int vs, double level,
    {
       if(g_pendLane[i] < 0) { slot = i; break; }
    }
-   if(slot < 0) slot = 0;      // oldest slot, never grows without bound
+   if(slot < 0)
+   {
+      //  Full: retire the oldest pending call, so the pen never grows and
+      //  never silently overwrites a recent one.
+      datetime oldest = 0;
+      slot = 0;
+      for(int i = 0; i < PEND_MAX; i++)
+      {
+         if(oldest == 0 || g_pendTime[i] < oldest)
+         {
+            oldest = g_pendTime[i];
+            slot = i;
+         }
+      }
+   }
 
    g_pendLane[slot]  = idx;
    g_pendTime[slot]  = g_lane[idx].lastBar;
@@ -1528,8 +1510,13 @@ void GradePending(int idx, double closeNow)
          if(g_pendVote[i][r] != 0 && outcome != 0)
             s = (g_pendVote[i][r] == outcome) ? 1 : -1;
          rv[r] = IntegerToString(s);
-         g_readN[idx][r]++;
-         if(s > 0) g_readHit[idx][r]++;
+         //  Count a reading only when it spoke. Diluting its rate with its own
+         //  abstentions would make a quiet reading look good and a busy one bad.
+         if(g_pendVote[i][r] != 0)
+         {
+            g_readN[idx][r]++;
+            if(s > 0) g_readHit[idx][r]++;
+         }
       }
 
       int slotOut = (hit > 0) ? 0 : ((hit < 0) ? 1 : 2);
@@ -1696,31 +1683,22 @@ bool UpdateLane(int idx)
    }
 
    //  ---- the declared facts ------------------------------------------
+   //  A demoted reading still shows its vote, but no longer counts toward the
+   //  decision. g_demoted is only ever set by the armed tweak.
+   int eMom  = g_demoted[idx][0] ? 0 : g_lane[idx].vMom;
+   int ePush = g_demoted[idx][1] ? 0 : g_lane[idx].vPush;
+   int eStr  = g_demoted[idx][2] ? 0 : g_lane[idx].vStretch;
+
    int spoke = 0, agree = 0;
-   int dir = DecideSignal(g_lane[idx].memory, g_lane[idx].vMom,
-                          g_lane[idx].vPush, g_lane[idx].vStretch, spoke, agree);
+   int dir = DecideSignal(g_lane[idx].memory, eMom, ePush, eStr, spoke, agree);
    g_lane[idx].score  = agree;
    g_lane[idx].spoke  = spoke;
    g_lane[idx].signal = dir;
 
-   //  A demoted reading stops counting toward agreement, but is still shown.
-   if(InpTweakArm)
-   {
-      int eff = 0;
-      if(g_lane[idx].vMom != 0 && !g_demoted[idx][0]) eff++;
-      if(g_lane[idx].vPush != 0 && !g_demoted[idx][1]) eff++;
-      if(g_lane[idx].vStretch != 0 && !g_demoted[idx][2]) eff++;
-      if(eff == 0 && dir != 0) g_lane[idx].signal = 0;
-   }
 
    //  TREND is the direction the momentum reading sees, with FLAT a real state.
    g_lane[idx].trend = g_lane[idx].vMom;
 
-   if(g_runPrev[idx] == -99)
-   {
-      g_runPrev[idx] = g_lane[idx].trend;
-      g_runNow[idx]  = 1;
-   }
    TrackTrend(idx, g_lane[idx].trend);
    g_lane[idx].trendAge = g_runNow[idx];
 
@@ -1780,19 +1758,27 @@ int PickFilling()
 //====================================================================
 //  THE TARGET
 //  Measured, never multiplied by volatility.  Replay past moments that
-//  looked the same as of that bar - same grade, same direction, a stop of
-//  the same size behind them - and record how far price actually ran
+//  looked the same AS OF THAT BAR - same direction, and a structural stop
+//  of the same kind behind them - and record how far price actually ran
 //  before an equal-sized stop took it out.
 //
-//  The cut is a FIXED share of that measured median (TP_CUT), not the
+//  What is matched: direction, and a stop placed at the nearest confirmed
+//  swing exactly as this lane places it.  What is NOT matched: the reading
+//  grade.  Computing the historical grade at every analogue bar would mean
+//  recomputing the whole indicator stack four hundred times per bar, and
+//  claiming a filter that is not applied would be worse than not claiming
+//  it.
+//
+//  The cut is a FIXED share of the measured median (TP_CUT), not the
 //  quantile that would make the reach count trivially 50%: the share of
-//  analogues that reached the chosen distance is then a genuine count,
-//  reported next to it with its sample size.
+//  analogues that reached the chosen distance is therefore a genuine
+//  count, reported beside it with its sample size.
 //====================================================================
 #define TP_CUT 0.80
 
-bool MeasureTarget(int idx, int dir, int grade, int spoke, double riskPrice, double tick,
-                   double &dist, double &reachShare, int &reachN, double &medBars, string &why)
+bool MeasureTarget(int idx, int dir, double riskPrice, double tick,
+                   double &dist, double &reachShare, int &reachN,
+                   double &medBars, string &why)
 {
    dist = 0.0; reachShare = 0.0; reachN = 0; medBars = 0.0; why = "";
    if(dir == 0 || riskPrice <= 0.0) { why = "no direction to measure"; return(false); }
@@ -1807,16 +1793,14 @@ bool MeasureTarget(int idx, int dir, int grade, int spoke, double riskPrice, dou
    if(n < window + horizon + 120)
    { why = "not enough history to measure a target"; return(false); }
 
-   double samples[];
-   double reached[];
-   double barsTo[];
-   int cnt = 0, rcnt = 0, bcnt = 0;
+   double ratio[];     // favourable travel, in units of the stop distance
+   int    barsTo[];    // how many bars it took
+   int    cnt = 0;
 
    for(int i = window + 2; i < n - horizon - 1; i++)
    {
       double entry = r[i].close;
 
-      //  The same structural stop this lane would have placed then.
       double level = 0.0;
       int first = i - window + 1;
       if(first < 1) first = 1;
@@ -1848,73 +1832,43 @@ bool MeasureTarget(int idx, int dir, int grade, int spoke, double riskPrice, dou
          if(fav > best) { best = fav; hitBar = k - i; }
       }
 
-      ArrayResize(samples, cnt + 1);
-      samples[cnt] = best / risk;
+      ArrayResize(ratio, cnt + 1);
+      ArrayResize(barsTo, cnt + 1);
+      ratio[cnt]  = best / risk;
+      barsTo[cnt] = hitBar;
       cnt++;
    }
 
    if(cnt < TP_MIN_CASES)
    { why = "too few like this to measure a target"; return(false); }
 
-   ArraySort(samples);
+   //  The median of the measured runs, without destroying the pairing.
+   double sorted[];
+   ArrayResize(sorted, cnt);
+   for(int i = 0; i < cnt; i++) sorted[i] = ratio[i];
+   ArraySort(sorted);
    int q = (int)MathFloor((double)(cnt - 1) * TP_QUANTILE);
    if(q < 0) q = 0;
    if(q >= cnt) q = cnt - 1;
-   double cut = samples[q] * TP_CUT;
+   double cut = sorted[q] * TP_CUT;
 
    dist = cut * riskPrice;
    if(dist <= 0.0)
    { why = "measured target too small"; return(false); }
 
-   //  The genuine count: how many of the same analogues reached it.
-   double barsSum = 0.0;
+   //  How many of the same analogues actually reached that distance, and how
+   //  long the ones that did took to get there.
+   int reached = 0, bn = 0;
+   double bsum = 0.0;
    for(int i = 0; i < cnt; i++)
    {
-      if(samples[i] * riskPrice >= dist)
-      {
-         rcnt++;
-         barsSum += 1.0;                 // placeholder, replaced below
-      }
+      if(ratio[i] < cut) continue;
+      reached++;
+      if(barsTo[i] > 0) { bsum += barsTo[i]; bn++; }
    }
-   reachN = cnt;
-   reachShare = 100.0 * (double)rcnt / (double)cnt;
-
-   //  Bars taken by the ones that did reach it: re-walk the sample loop so the
-   //  bar counts match the distance actually chosen.
-   double bsum = 0.0;
-   int bn = 0;
-   for(int i = window + 2; i < n - horizon - 1; i++)
-   {
-      double entry = r[i].close;
-      double level = 0.0;
-      int first = i - window + 1;
-      if(first < 1) first = 1;
-      for(int k = first; k < i; k++)
-      {
-         if(dir > 0 && SwingLowOk(r, k, i) && r[k].low < entry)
-         {
-            if(level == 0.0 || r[k].low > level) level = r[k].low;
-         }
-         if(dir < 0 && SwingHighOk(r, k, i) && r[k].high > entry)
-         {
-            if(level == 0.0 || r[k].high < level) level = r[k].high;
-         }
-      }
-      if(level == 0.0) continue;
-      double stop = (dir > 0) ? level - tick : level + tick;
-      double risk = MathAbs(entry - stop);
-      if(risk <= 0.0) continue;
-
-      bool done = false;
-      for(int k = i + 1; k <= i + horizon && k < n && !done; k++)
-      {
-         if(dir > 0 && r[k].low <= stop) break;
-         if(dir < 0 && r[k].high >= stop) break;
-         double fav = (dir > 0) ? (r[k].high - entry) : (entry - r[k].low);
-         if(fav >= dist) { bsum += (double)(k - i); bn++; done = true; }
-      }
-   }
-   medBars = (bn > 0) ? (bsum / bn) : 0.0;
+   reachN     = cnt;
+   reachShare = 100.0 * (double)reached / (double)cnt;
+   medBars    = (bn > 0) ? (bsum / bn) : 0.0;
    return(true);
 }
 
@@ -2005,8 +1959,6 @@ bool BuildPlan(int idx)
    if(g_lane[idx].signal == 0)     { g_plan[idx].note = "NO SIGNAL"; return(false); }
 
    int dir = g_lane[idx].signal;
-   if(g_lane[idx].memory == MEM_UNCLEAR)
-   { g_plan[idx].note = "WAIT: memory unclear"; return(false); }
 
    double tick  = g_f.tick > 0.0 ? g_f.tick : g_f.point;
    double point = g_f.point > 0.0 ? g_f.point : tick;
@@ -2023,11 +1975,12 @@ bool BuildPlan(int idx)
    TimeToStruct(ServerNow(), st);
    int sn = 0;
    double typical = SpreadBaseline(st.hour, sn);
-   if(sn >= 20 && typical > 0.0 && spread > typical * MAX_SPREAD_GATE)
+   double gateX = (g_p.spreadGateX > 0.0) ? g_p.spreadGateX : MAX_SPREAD_GATE;
+   if(sn >= 20 && typical > 0.0 && spread > typical * gateX)
    { g_plan[idx].note = "WAIT: spread too wide"; return(false); }
 
    //  Total exposure cap across lanes.
-   if(OpenRiskPct() >= RISK_TOTAL_PCT)
+   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9)
    { g_plan[idx].note = "WAIT: lane risk cap reached"; return(false); }
 
    int window = LaneStructWindow(idx);
@@ -2104,8 +2057,7 @@ bool BuildPlan(int idx)
    double dist = 0.0, reach = 0.0, medBars = 0.0;
    int reachN = 0;
    string tWhy = "";
-   if(!MeasureTarget(idx, dir, g_lane[idx].score, g_lane[idx].spoke, risk, tick,
-                     dist, reach, reachN, medBars, tWhy))
+   if(!MeasureTarget(idx, dir, risk, tick, dist, reach, reachN, medBars, tWhy))
    { g_plan[idx].note = "WAIT: " + tWhy; return(false); }
 
    double tp = (dir > 0) ? SnapDown(entry + dist, tick) : SnapUp(entry - dist, tick);
@@ -2226,6 +2178,13 @@ void TradeSync(int idx)
             double sl = g_pos.StopLoss();
             if(sl > 0.0)
                g_lane[idx].origRisk = MathAbs(g_pos.PriceOpen() - sl);
+
+            //  A position inherited from before a restart has no stored TP1.
+            //  Rebuild it the same way the plan built it, from the trade's own
+            //  entry and target - never from today's plan.
+            double tpx = g_pos.TakeProfit();
+            if(tpx > 0.0 && g_lane[idx].tp1Price <= 0.0)
+               g_lane[idx].tp1Price = g_pos.PriceOpen() + 0.5 * (tpx - g_pos.PriceOpen());
             g_lane[idx].tradedTrend  = g_lane[idx].trend;
             g_lane[idx].tradedSignal = g_lane[idx].signal;
             g_posDir[idx] = (g_pos.PositionType() == POSITION_TYPE_BUY) ? 1 : -1;
@@ -2341,7 +2300,7 @@ bool SendPlan(int idx)
    //  Netting: two lanes may not hold opposite positions.
    if(NettingOppositeVolume(g_plan[idx].dir) > 0.0) return(false);
 
-   if(OpenRiskPct() >= RISK_TOTAL_PCT) return(false);
+   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return(false);
 
    g_trade.SetExpertMagicNumber(LaneMagic(idx));
    g_trade.SetDeviationInPoints(20);
@@ -2368,6 +2327,7 @@ bool SendPlan(int idx)
    if(sent)
    {
       g_lane[idx].origRisk     = MathAbs(g_plan[idx].entry - g_plan[idx].sl);
+      g_lane[idx].tp1Price     = g_plan[idx].tp1;
       g_lane[idx].tradedTrend  = g_lane[idx].trend;
       g_lane[idx].tradedSignal = g_lane[idx].signal;
       TradeSync(idx);
@@ -2518,9 +2478,10 @@ void ManageSecond(int idx)
    double price = isBuy ? g_f.bid : g_f.ask;
 
    //  ---- TP1: close a share, then protect what is left --------------
-   if(InpTp1Tp2 && !g_lane[idx].tp1Done && g_plan[idx].tp1 > 0.0)
+   if(InpTp1Tp2 && !g_lane[idx].tp1Done && g_lane[idx].tp1Price > 0.0)
    {
-      bool reached = isBuy ? (g_f.bid >= g_plan[idx].tp1) : (g_f.ask <= g_plan[idx].tp1);
+      bool reached = isBuy ? (g_f.bid >= g_lane[idx].tp1Price)
+                           : (g_f.ask <= g_lane[idx].tp1Price);
       if(reached)
       {
          double part = MathFloor((vol * TP1_FRACTION) / g_f.volStep + 1e-8) * g_f.volStep;
@@ -2700,7 +2661,7 @@ string PlanStateText(int idx)
 {
    if(!g_lane[idx].ready) return("DATA WAIT");
    if(g_lane[idx].signal == 0) return("NO SIGNAL");
-   if(g_lane[idx].ok) return("READY");
+   if(g_plan[idx].ok) return("READY");
    return(g_plan[idx].note);
 }
 
@@ -2804,8 +2765,12 @@ void DrawPanel()
       }
       string row = " " + Pad(g_lane[i].name, 5) + Pad(side, 6) + Pad(en, 10) + Pad(lt, 6) +
                    Pad(tg, 19) + Pad(sp, 18) + PlanStateText(i);
-      PanelLine(row, g_plan[i].ok ? clrWhite : PlanStateColour(i),
-                "WAIT is not a failure: it is the EA refusing to invent a level it cannot measure.");
+      string tip = "WAIT is not a failure: it is the EA refusing to invent a level it cannot measure.";
+      if(!g_lane[i].ready)
+         tip = StringFormat("This lane needs %d closed bars and the terminal has %d. "
+                            "Nothing is claimed until it has them.",
+                            g_lane[i].needBars, g_lane[i].haveBars);
+      PanelLine(row, g_plan[i].ok ? clrWhite : PlanStateColour(i), tip);
    }
 
    PanelLine("", clrWhite, "");
@@ -3025,12 +2990,21 @@ void Heartbeat()
    if(TimeframeAllowed((ENUM_TIMEFRAMES)Period()))
    {
       UpdateLanes();
-      for(int i = 0; i < LANE_COUNT; i++)
+
+      //  The per-second path is a per-second path.  Running it on every tick
+      //  would read the same numbers many times a second for no gain.
+      static datetime lastManage = 0;
+      datetime nowS = TimeTradeServer();
+      if(lastManage == 0 || nowS != lastManage)
       {
-         ManageSecond(i);
-         ApplyTweak(i, 0);
-         ApplyTweak(i, 1);
-         ApplyTweak(i, 2);
+         lastManage = nowS;
+         for(int i = 0; i < LANE_COUNT; i++)
+         {
+            ManageSecond(i);
+            ApplyTweak(i, 0);
+            ApplyTweak(i, 1);
+            ApplyTweak(i, 2);
+         }
       }
    }
 
@@ -3067,6 +3041,7 @@ int OnInit()
       g_lane[i].ticket  = 0;
       g_lane[i].armed   = false;
       g_lane[i].tp1Done = false;
+      g_lane[i].tp1Price = 0.0;
       g_lane[i].origRisk = 0.0;
       g_lane[i].openLots = 0.0;
       g_lane[i].tradedTrend  = 0;

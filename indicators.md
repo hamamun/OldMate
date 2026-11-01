@@ -377,7 +377,7 @@ line.
 | Number | Procedure |
 |---|---|
 | **HOLDS** (bars remaining) | Take this lane's completed runs of the same state. Keep those that outlived the current age. The median of their residuals is the estimate; the interquartile range is shown beside it in hover. Below a minimum count of survivors, the cell shows `--` |
-| **share that reach target** | Take replayed analogues of the same grade, direction and stop size. Count those that reached the measured target before an equal-sized stop within the horizon. The share and its sample count are shown; below the minimum count, the number is withheld |
+| **share that reach target** | Take replayed analogues of the same direction, each judged with the same kind of structural stop the lane places. Count those that reached the measured target before an equal-sized stop within the horizon. The share and its sample count are shown; below the minimum count, the number is withheld |
 | **est. bars to target** | Among the analogues that *did* reach it, the distribution of bars taken. Shown as a middle range, and only when the lane's measured travel per bar points toward the target. Otherwise `unclear` |
 | **travel per bar** | Median favourable and adverse travel per bar in this state, on this lane, in units of the measured unit. Hover only |
 

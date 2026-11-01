@@ -1,6 +1,6 @@
 # OldMate — the plan, as built
 
-**Status: built. `OldMate.mq5` exists, preflight-clean, 3 122 lines.** It has not yet been
+**Status: built. `OldMate.mq5` exists, preflight-clean, 3 097 lines.** It has not yet been
 compiled in MetaEditor or run on a demo account — that is the only step left, and section 17
 says exactly how to judge it.
 
@@ -221,7 +221,7 @@ uncalibrated lane cannot trade.** That is rule 1 applied literally.
 | `TREND` + a bar count | the momentum reading's direction and how long it has held |
 | `REGIME` two words | memory, then volatility. Counted, never guessed |
 | `SCORE` `2/2` | how many of the readings that spoke agree with the call. **Agreement, never a win rate.** `±3` is impossible by construction — the two families never agree |
-| `SIGNAL` `64% (18)` | the call, and the share of same-grade analogues that reached their measured target, with the sample size. Withheld under 24 cases |
+| `SIGNAL` `64% (18)` | the call, and the share of replayed analogues that reached their measured target, with the sample size. Withheld under 24 cases |
 | `HOLDS` | median remaining bars for this state from its own completed runs, with the middle range |
 | `STATE` | `READY`, `WAIT: <reason>`, `NO SIGNAL`, `DATA WAIT` — what the *plan* is |
 
@@ -235,8 +235,9 @@ when the sample is too small:
 
 1. **HOLDS** — how much longer this state lasts, from the lane's own completed runs
    conditioned on how far this one has already got.
-2. **reach %** — among replayed analogues of the same grade, direction and stop size, the share
-   that reached the measured target before an equal-sized stop, within the lane's horizon.
+2. **reach %** — among replayed analogues of the same direction, each judged with the same kind
+   of structural stop this lane places, the share that reached the measured target before an
+   equal-sized stop, within the lane's horizon.
 3. **typical bars to the target** — from the same replay, shown in the details panel.
 4. **the stop that decided it** — every analogue is judged with a stop of the same size the
    trade in front of you will carry, not an easier one.
@@ -256,6 +257,10 @@ and refused, and nothing here reintroduces it.
 - **Target** — replayed analogues, cut at 80 % of their median favourable run. Then capped
   before the nearest confirmed opposing turn, and required to clear the spread by 2×. A
   measured target of zero is `WAIT`, with the reason named.
+  What the replay matches is **direction and the kind of stop**, not the reading grade:
+  recomputing the historical grade at four hundred analogue bars would mean running the whole
+  indicator stack four hundred times per bar, and claiming a filter that is not applied would be
+  worse than not claiming it.
 - **Size** — 0.50 % of equity, converted to lots by **`OrderCalcProfit`**, the terminal's own
   money calculation for this symbol and this stop. Never hand arithmetic, never an assumed pip
   value. Refused when the budget cannot buy the minimum lot, unless `Minimum lot` is ticked.
@@ -328,14 +333,30 @@ timeframe other than M5 / M15 / M30.
 
 **Done:**
 
-1. `python3 tools/preflight.py OldMate.mq5` — clean: delimiters balanced, no duplicate
-   definitions, no calls to functions that do not exist, every call's argument count correct,
+1. `python3 tools/preflight.py OldMate.mq5` — clean, 22 checks, 0 failures: delimiters
+   balanced, no duplicate definitions, no calls to functions that do not exist, every call's
+   argument count correct, **every struct field read exists on that struct**, no dead constants,
    every input read, guards present.
 2. `python3 tools/selftest.py` — **ALL CHECKS PASSED**: Wilder seeding, true-range gaps,
    MACD-V scale-freedom (0.00 % spread between a 100-price and a 3 500-price series), percentile
    calibration (5.29 % and 5.46 % against a stated 5 %), memory separation (0.548 / 0.696 /
    0.412), reading independence, and a truncated-versus-full-series test proving no reading
    depends on a later bar.
+
+**A second read-through found six real defects, all fixed.** They are worth naming, because
+they are the argument for reading code after writing it:
+
+| Defect | Consequence had it shipped |
+|---|---|
+| the record was read back with every field one place off | restored counts would have been wrong after every restart |
+| a reading was graded on the calls where it abstained | a quiet reading would have looked better than it was, and the tweak would have demoted the wrong one |
+| `g_lane[idx].ok` where the field is on `g_plan` | would not compile |
+| TP1 was taken from the live plan instead of the trade | a rebuilt plan could have triggered the partial on the wrong side |
+| a demoted reading still counted toward the decision | the tweak would have been decorative |
+| no session table was reported as "Market closed" | a false report, which rule 1 forbids outright |
+
+The checker was extended to catch the "field does not exist" class automatically — and caught
+the compile error on its first run.
 
 **Still to do, and only this:**
 

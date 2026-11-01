@@ -190,6 +190,41 @@ chk("no calls to functions that do not exist", not unknown, ", ".join(unknown))
 
 print()
 print("=" * 70)
+print("STRUCT MEMBERS")
+print("=" * 70)
+# Every "g_thing.field" must name a field that actually exists on that struct.
+structs = {}
+for m in re.finditer(r"struct\s+(\w+)\s*\{(.*?)\n\};", s, re.S):
+    name, body = m.group(1), m.group(2)
+    fields = set(re.findall(r"^\s*[A-Za-z_]\w*(?:\s*\[\s*\d*\s*\])?\s+(\w+)\s*(?:\[[^\]]*\]|\[[^\]]*\])?\s*;",
+                            body, re.M))
+    structs[name] = fields
+
+vartype = {}
+for m in re.finditer(r"^\s*(\w+)\s+(g_\w+)\s*(?:\[[^\]]*\]|\[[^\]]*\])?\s*;", s, re.M):
+    vartype[m.group(2)] = m.group(1)
+
+bad_fields = []
+for m in re.finditer(r"\b(g_\w+)\s*(?:\[[^\]]*\])?\s*\.\s*(\w+)", s):
+    var, field = m.group(1), m.group(2)
+    t = vartype.get(var)
+    if t in structs and field not in structs[t]:
+        line = s[:m.start()].count("\n") + 1
+        bad_fields.append(f"{var}.{field} at line {line} (not a field of {t})")
+chk("every struct field read exists", not bad_fields, "; ".join(sorted(set(bad_fields))[:6]))
+print(f"      {len(structs)} structs checked")
+
+print()
+print("=" * 70)
+print("DEAD CONSTANTS")
+print("=" * 70)
+macros = re.findall(r"^#define\s+(\w+)\s+(.+)$", s, re.M)
+dead = [n for n, _ in macros
+        if len(re.findall(r"(?<![\w])" + n + r"(?![\w])", s)) < 2]
+chk("no #define is declared and never used", not dead, ", ".join(dead))
+
+print()
+print("=" * 70)
 print("INPUTS")
 print("=" * 70)
 inputs = re.findall(r"^input\s+\w+\s+(\w+)\s*=", s, re.M)
