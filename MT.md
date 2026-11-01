@@ -14,10 +14,16 @@ MT uses the same three.
 
 ## Phase 1 — header, row 1
 
-Left to right:
+Open:
 
 ```text
  MT V1.00 | XAUUSDm | Metal | OPEN | 2026.11.01 11:57:34
+```
+
+Closed:
+
+```text
+ MT V1.00 | XAUUSDm | Metal | close | Open at 2026.11.01 11:57:34
 ```
 
 | Cell | Content |
@@ -25,16 +31,20 @@ Left to right:
 | `MT V1.00` | name and version |
 | Symbol name | the broker's own spelling |
 | Symbol type | Forex / Metal / Index / Energy / Crypto / Stock / Other |
-| `OPEN` / `CLOSED` | market state |
-| `2026.11.01 11:57:34` | server time and date, in the terminal's own format, ticking every second |
+| `OPEN` / `close` | market state |
+| last cell | while open: server date and time, ticking every second. While closed: `Open at` and the next opening time, from the broker's session table |
 
-56 characters — about 448 px at 10 pt. The date and time are fixed width, so the cell never
-shifts as the seconds change.
+56 characters open, 65 closed — **about 448 and 520 px** at 10 pt.
 
-The clock is the sync check: it ticks every second while the terminal is connected, and freezes
-when it is not, so a stopped clock beside `OPEN` says the panel is reading stale data.
+The box is sized to the **widest** of the two states, so it never jumps or resizes as the market
+shuts. The date and time are fixed width, so nothing shifts as the seconds change.
+
+While open, the clock is the sync check: it ticks every second while the terminal is connected and
+freezes when it is not, so a stopped clock beside `OPEN` says the panel is reading stale data.
+
+If the broker publishes no table, there is no opening time to count to, and the cell says so
+rather than inventing one:
 
 ```text
- MT V1.00 | XAUUSDm | Metal | CLOSED | 2026.11.01 11:57:34
- MT V1.00 | BTCUSDm | Crypto | OPEN | 2026.11.01 11:57:34
+ MT V1.00 | BTCUSDm | Crypto | close | Open at --
 ```
