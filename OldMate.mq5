@@ -2342,8 +2342,13 @@ bool SendPlan(int idx)
       //  Two datetimes cannot be added. Add in long, then cast back.
       datetime expiry = (datetime)((long)TimeTradeServer() +
                                    (long)(3 * PeriodSeconds(g_lane[idx].tf)));
+      //  CTrade::OrderOpen takes ten arguments - the seventh is the stop-limit
+      //  price, which is 0 for an ordinary limit order. Leaving it out put the
+      //  time-in-force enum where a double belongs, which is the compiler's
+      //  "cannot convert enum" at this line.
       sent = g_trade.OrderOpen(_Symbol, t, g_plan[idx].lot, g_plan[idx].entry,
-                               g_plan[idx].sl, g_plan[idx].tp, ORDER_TIME_SPECIFIED, expiry,
+                               g_plan[idx].sl, g_plan[idx].tp, 0.0,
+                               ORDER_TIME_SPECIFIED, expiry,
                                "OldMate " + g_lane[idx].name);
    }
 

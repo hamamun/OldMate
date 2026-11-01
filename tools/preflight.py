@@ -228,6 +228,50 @@ chk("no #define is declared and never used", not dead, ", ".join(dead))
 
 print()
 print("=" * 70)
+print("LIBRARY CALLS  (argument counts for the CTrade / CPositionInfo methods used)")
+print("=" * 70)
+# Signatures of the standard-library methods this file calls, as
+# name -> (required, maximum). A missing argument here is exactly the class of
+# error that produced "cannot convert enum" at OrderOpen: the compiler then
+# reports the *type* of the argument that slid into the wrong slot.
+LIB = {
+    "PositionOpen": (6, 7),
+    "PositionModify": (3, 3),
+    "PositionClose": (1, 2),
+    "PositionClosePartial": (2, 3),
+    "OrderOpen": (8, 10),
+    "OrderModify": (5, 7),
+    "OrderDelete": (1, 1),
+    "SelectByIndex": (1, 1),
+    "SelectByTicket": (1, 1),
+}
+
+lib_bad = []
+for m in re.finditer(r"\b(g_trade|g_pos)\s*\.\s*(\w+)\s*\(", s):
+    obj, meth = m.group(1), m.group(2)
+    if meth not in LIB:
+        continue
+    start = m.end()
+    depth, n = 1, 0
+    i = start
+    while i < len(s) and depth > 0:
+        if s[i] in "([":
+            depth += 1
+        elif s[i] in ")]":
+            depth -= 1
+        elif s[i] == "," and depth == 1:
+            n += 1
+        i += 1
+    got = 0 if s[start:i - 1].strip() == "" else n + 1
+    lo, hi = LIB[meth]
+    line = s[:m.start()].count("\n") + 1
+    if not (lo <= got <= hi):
+        lib_bad.append(f"{obj}.{meth} at line {line}: {got} args, signature allows {lo}-{hi}")
+chk("every library call has a legal argument count", not lib_bad,
+    "; ".join(lib_bad[:5]))
+
+print()
+print("=" * 70)
 print("INPUTS")
 print("=" * 70)
 inputs = re.findall(r"^input\s+\w+\s+(\w+)\s*=", s, re.M)

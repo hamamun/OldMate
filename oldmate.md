@@ -1,6 +1,6 @@
 # OldMate — the plan, as built
 
-**Status: built. `OldMate.mq5` exists, preflight-clean, 3 126 lines.** It has not yet been
+**Status: built. `OldMate.mq5` exists, preflight-clean, 3 131 lines.** It has not yet been
 compiled in MetaEditor or run on a demo account — that is the only step left, and section 17
 says exactly how to judge it.
 
@@ -372,6 +372,13 @@ Two more of the same class were found by sweeping for the pattern rather than wa
 the next compile: every `datetime` subtraction in the file (five of them) is now done in
 `long`, and the enum ternary in `OnInit` is cast explicitly. The checker was also taught the
 `ENUM_*` return type, which it had been misreading as an unknown function.
+
+**The second compile found one error, fixed the same way.** `CTrade::OrderOpen`
+takes ten arguments; the file passed nine. The seventh is the stop-limit price, so leaving it
+out slid the time-in-force enum into a `double` slot and the compiler reported
+`cannot convert enum` rather than a missing argument. It is now passed as `0.0`, which is what a
+plain limit order needs. `tools/preflight.py` gained an argument-count check for every library
+method this file calls, so a wrong count is caught here rather than by MetaEditor.
 
 **Still to do, and only this:**
 
