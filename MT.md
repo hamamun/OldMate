@@ -45,3 +45,14 @@ rather than inventing one:
 ```text
  MT V1.00 | BTCUSDm | Crypto | close | Open at --
 ```
+
+**Note — the panel reserves space for three more rows below row 1, always, whether or not they are
+filled.** Row 1 is the header; rows 2, 3 and 4 come next, each specified in its own step. The box
+height is fixed at four rows so the panel never resizes as those rows come and go:
+
+```text
+ row 1   header
+ row 2   reserved
+ row 3   reserved
+ row 4   reserved
+```
