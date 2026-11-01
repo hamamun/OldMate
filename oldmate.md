@@ -1,6 +1,6 @@
 # OldMate — the plan, as built
 
-**Status: built. `OldMate.mq5` exists, preflight-clean, 3 131 lines.** It has not yet been
+**Status: built. `OldMate.mq5` exists, preflight-clean, 3 211 lines.** It has not yet been
 compiled in MetaEditor or run on a demo account — that is the only step left, and section 17
 says exactly how to judge it.
 
@@ -372,6 +372,20 @@ Two more of the same class were found by sweeping for the pattern rather than wa
 the next compile: every `datetime` subtraction in the file (five of them) is now done in
 `long`, and the enum ternary in `OnInit` is cast explicitly. The checker was also taught the
 `ENUM_*` return type, which it had been misreading as an unknown function.
+
+**Field feedback on the panel, fixed.** The first screenshot from a live chart
+showed four things wrong, all now corrected:
+
+| What was seen | Cause | Fix |
+|---|---|---|
+| the word `Label` on blank lines | an empty string does not clear a label's text, so the object kept its default caption | a blank line is drawn as a single space |
+| lines overlapping each other | 15 px spacing against a taller rendered font | line height is now `font size + 9`, and the box height is computed from the line count |
+| text unreadable over candles | no background at all | every panel is drawn on an opaque rectangle, sized to its own longest line |
+| **no panel at all when the market was closed, or on an unsupported timeframe** | `ChartRedraw()` was only called in `OnDeinit`. With no ticks there is no repaint, so the objects existed but were never shown | `ChartRedraw()` now runs after every draw, driven by the one-second timer, so a closed market still repaints |
+
+The column widths also moved into one place (`C_TF`, `C_TREND`, `C_REGIME`, …) so the header
+and the rows can never disagree again. The details panel now sits beside the main panel when
+there is room and below it when there is not, instead of running off the edge.
 
 **The second compile found one error, fixed the same way.** `CTrade::OrderOpen`
 takes ten arguments; the file passed nine. The seventh is the stop-limit price, so leaving it

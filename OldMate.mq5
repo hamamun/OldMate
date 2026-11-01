@@ -283,14 +283,6 @@ datetime OrdSetupTime()        { return((datetime)OrderGetInteger(ORDER_TIME_SET
 ENUM_ORDER_TYPE OrdKind()      { return((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE)); }
 
 //  Panel bookkeeping
-string        g_line[];
-color         g_lineClr[];
-int           g_segFrom[];
-int           g_segN[];
-string        g_segTxt[];
-color         g_segClr[];
-string        g_segTip[];
-int           g_drawn = 0;
 
 //  Record bookkeeping
 string        g_recName  = "";
@@ -2589,38 +2581,122 @@ void ReconcileAll()
 
 //====================================================================
 //  PANEL
+//
+//  Built as a line buffer first, then measured, then drawn on an opaque
+//  box.  Three things this replaced, all of them visible in the field:
+//    * an empty line was drawn as an empty string, which MetaTrader shows
+//      as the label's default text, the word "Label";
+//    * lines were spaced 15 px apart while the font renders taller, so
+//      they overlapped each other;
+//    * ChartRedraw was never called, so with no incoming ticks - a closed
+//      market - the chart never repainted and no panel appeared at all.
 //====================================================================
-void PanelReset()
+#define PANEL_BG    C'20,24,30'
+#define PANEL_EDGE  C'70,80,95'
+#define PANEL_PAD   12
+#define LINE_H      (FONT_SIZE + 9)
+
+string g_bTxt[2][80];
+color  g_bClr[2][80];
+string g_bTip[2][80];
+int    g_bN[2] = {0, 0};
+int    g_panelW = 0;
+int    g_panelH = 0;
+
+void PBegin(int b) { g_bN[b] = 0; }
+
+void PAdd(int b, string text, color clr = clrWhite, string tip = "")
 {
-   g_drawn = 0;
+   if(b < 0 || b > 1) return;
+   if(g_bN[b] >= 80) return;
+   //  An empty string leaves the object showing its default text, "Label".
+   //  A single space is a blank line that stays blank.
+   g_bTxt[b][g_bN[b]] = (text == "") ? " " : text;
+   g_bClr[b][g_bN[b]] = clr;
+   g_bTip[b][g_bN[b]] = tip;
+   g_bN[b]++;
 }
 
-void PanelLine(string text, color clr, string tip)
+int PWidth(int b)
 {
-   string name = PANEL_PREFIX + IntegerToString(g_drawn);
-   if(ObjectFind(0, name) < 0)
-      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+   int m = 1;
+   for(int i = 0; i < g_bN[b]; i++)
+      m = MathMax(m, StringLen(g_bTxt[b][i]));
+   return(m);
+}
+
+void BoxDraw(string prefix, int x, int y, int w, int h)
+{
+   string name = prefix + "BOX";
+   if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, PANEL_X);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, PANEL_Y + g_drawn * (FONT_SIZE + 6));
-   ObjectSetString (0, name, OBJPROP_TEXT, text);
-   ObjectSetString (0, name, OBJPROP_FONT, FONT_NAME);
-   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, FONT_SIZE);
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, PANEL_BG);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, PANEL_EDGE);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-   ObjectSetString (0, name, OBJPROP_TOOLTIP, tip);
-   g_drawn++;
+   ObjectSetInteger(0, name, OBJPROP_ZORDER, 0);
 }
 
-void PanelTrim()
+void BoxDelete(string prefix)
 {
-   //  Remove labels left over from a taller previous draw.
-   for(int i = g_drawn; i < g_drawn + 60; i++)
+   string name = prefix + "BOX";
+   if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+}
+
+//  Draw one buffer at (x, y) on an opaque box, and return its height.
+int PRender(int b, string prefix, int x, int y)
+{
+   if(g_bN[b] <= 0)
    {
-      string name = PANEL_PREFIX + IntegerToString(i);
-      if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+      for(int i = 0; i < 80; i++)
+      {
+         string nm = prefix + IntegerToString(i);
+         if(ObjectFind(0, nm) >= 0) ObjectDelete(0, nm);
+      }
+      BoxDelete(prefix);
+      return(0);
    }
+
+   //  Consolas is monospaced. 0.80 of the point size is a safe per-character
+   //  width, so the box always clears the longest line instead of clipping it.
+   int cw = (int)MathRound(FONT_SIZE * 0.80);
+   if(cw < 6) cw = 6;
+   int w = PWidth(b) * cw + 2 * PANEL_PAD;
+   int h = g_bN[b] * LINE_H + PANEL_PAD + 6;
+
+   BoxDraw(prefix, x, y, w, h);
+
+   for(int i = 0; i < g_bN[b]; i++)
+   {
+      string name = prefix + IntegerToString(i);
+      if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x + PANEL_PAD);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y + PANEL_PAD / 2 + i * LINE_H);
+      ObjectSetString (0, name, OBJPROP_TEXT, g_bTxt[b][i]);
+      ObjectSetString (0, name, OBJPROP_FONT, FONT_NAME);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, FONT_SIZE);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, g_bClr[b][i]);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      ObjectSetInteger(0, name, OBJPROP_ZORDER, 1);
+      ObjectSetString (0, name, OBJPROP_TOOLTIP, g_bTip[b][i]);
+   }
+   for(int i = g_bN[b]; i < 80; i++)
+   {
+      string nm = prefix + IntegerToString(i);
+      if(ObjectFind(0, nm) >= 0) ObjectDelete(0, nm);
+   }
+   return(h);
 }
 
 void PanelRemoveAll()
@@ -2632,8 +2708,13 @@ void PanelRemoveAll()
       string dn = DETAIL_PREFIX + IntegerToString(i);
       if(ObjectFind(0, dn) >= 0) ObjectDelete(0, dn);
    }
+   BoxDelete(PANEL_PREFIX);
+   BoxDelete(DETAIL_PREFIX);
 }
 
+//------------------------------------------------------------------
+//  small text helpers used by the tables
+//------------------------------------------------------------------
 string TrendText(int t)
 {
    if(t > 0) return("UP");
@@ -2671,9 +2752,8 @@ string ScoreText(int idx)
 string HoldsText(int idx)
 {
    if(!g_lane[idx].holdsOk) return("--");
-   return(IntegerToString(g_lane[idx].holdsBars) + " bars (" +
-          IntegerToString(g_lane[idx].holdsLo) + "-" +
-          IntegerToString(g_lane[idx].holdsHi) + ")");
+   return(StringFormat("%d bars (%d-%d)", g_lane[idx].holdsBars,
+                       g_lane[idx].holdsLo, g_lane[idx].holdsHi));
 }
 
 string SignalCellText(int idx)
@@ -2720,39 +2800,57 @@ string ReadScoreText(int reading)
    return(s);
 }
 
+//  Column widths, one place, so the header and the rows can never disagree.
+#define C_TF      5
+#define C_TREND   13
+#define C_REGIME  19
+#define C_SCORE   7
+#define C_SIGNAL  20
+#define C_SIDE    6
+#define C_ENTRY   13
+#define C_LOT     7
+#define C_TARGET  21
+#define C_STOP    21
+
 void DrawPanel()
 {
-   PanelReset();
+   PBegin(0);
 
-   string hd = " " + EA_NAME + "   " + g_f.name + "  |  " + ClassLabel(g_p.cls) +
-               "  |  " + (g_f.hedging ? "Hedging" : "Netting") +
-               "  |  Equity " + DoubleToString(g_f.equity, 2) + " " + g_f.currency;
-   PanelLine(hd, clrWhite, "Symbol, instrument class, account type and equity, all read from the terminal.");
+   //  ---- header ------------------------------------------------------
+   PAdd(0, " " + EA_NAME + "   " + g_f.name + "  |  " + ClassLabel(g_p.cls) +
+           "  |  " + (g_f.hedging ? "Hedging" : "Netting") +
+           "  |  Equity " + DoubleToString(g_f.equity, 2) + " " + g_f.currency,
+        clrWhite, "Symbol, instrument class, account type and equity, all read from the terminal.");
 
-   string mk = " " + g_m.text + "  |  " + g_m.session + (g_m.sessionEst ? " (est.)" : "") +
-               "  |  Spread " + DoubleToString(g_m.spreadPoints, 0) + " pts (" +
-               (g_m.spreadNormal ? "normal" : "wide") + ")";
-   PanelLine(mk, g_m.colour, "Broker sessions decide availability. The session name is a label, never a filter.");
+   PAdd(0, " " + g_m.text + "  |  " + g_m.session + (g_m.sessionEst ? " (est.)" : "") +
+           "  |  Spread " + DoubleToString(g_m.spreadPoints, 0) + " pts (" +
+           (g_m.spreadNormal ? "normal" : "wide") + ")",
+        g_m.colour, "The broker's own sessions decide availability. The session name is a label, never a filter.");
 
-   string at = " " + AutoTradeText();
-   PanelLine(at, AutoTradeColour(),
-             "Autotrading ON is the EA's permission. MT5's own Algo Trading button has a veto of its own.");
+   PAdd(0, " " + AutoTradeText(), AutoTradeColour(),
+        "Autotrading ON is this EA's permission. MT5's own Algo Trading button has a veto of its own.");
 
+   //  ---- out of range: say it, and stop ------------------------------
    if(!TimeframeAllowed((ENUM_TIMEFRAMES)Period()))
    {
-      PanelLine("", clrWhite, "");
-      PanelLine(" OUT OF RANGE - attach to M5, M15 or M30", clrTomato,
-                "OldMate is designed for three lanes. On any other timeframe it reads nothing and sends nothing.");
-      PanelLine(" Nothing is read, planned or sent on this chart.", clrGoldenrod,
-                "An honest refusal, rather than a fourth personality nobody measured.");
-      PanelTrim();
+      PAdd(0, "");
+      PAdd(0, " OUT OF RANGE - attach to M5, M15 or M30", clrTomato,
+           "OldMate is designed for three lanes. On any other timeframe it reads nothing, plans nothing and sends nothing.");
+      PAdd(0, " Nothing is read, planned or sent on this chart.", clrGoldenrod,
+           "An honest refusal, rather than a fourth personality nobody measured.");
+      PAdd(0, " This chart: " + EnumToString((ENUM_TIMEFRAMES)Period()), clrGray, "");
+      g_panelH = PRender(0, PANEL_PREFIX, PANEL_X, PANEL_Y);
+      g_panelW = PWidth(0) * (int)MathRound(FONT_SIZE * 0.80) + 2 * PANEL_PAD;
+      PBegin(1);
+      PRender(1, DETAIL_PREFIX, PANEL_X, PANEL_Y);
       return;
    }
 
-   PanelLine("", clrWhite, "");
-   PanelLine(" " + Pad("TF", 5) + Pad("TREND", 12) + Pad("REGIME", 17) +
-             Pad("SCORE", 7) + Pad("SIGNAL", 18) + "HOLDS", clrGray,
-             "Agreement, never a win rate. The percentage beside a call is the share of same-grade past situations that reached their measured target.");
+   //  ---- lane table ---------------------------------------------------
+   PAdd(0, "");
+   PAdd(0, " " + Pad("TF", C_TF) + Pad("TREND", C_TREND) + Pad("REGIME", C_REGIME) +
+           Pad("SCORE", C_SCORE) + Pad("SIGNAL", C_SIGNAL) + "HOLDS", clrGray,
+        "Agreement, never a win rate. The percentage beside a call is the share of replayed situations that reached their measured target.");
 
    for(int i = 0; i < LANE_COUNT; i++)
    {
@@ -2764,22 +2862,21 @@ void DrawPanel()
       string sg = g_lane[i].ready ? SignalCellText(i) : "--";
       string ho = g_lane[i].ready ? HoldsText(i) : "--";
 
-      string row = " " + Pad(g_lane[i].name, 5) + Pad(tr, 12) + Pad(rg, 17) +
-                   Pad(sc, 7) + Pad(sg, 18) + ho;
-      color c = g_lane[i].ready ? SignalColour(g_lane[i].signal) : clrDimGray;
-
-      string tip = "Memory says what kind of series this is; volatility says how loud. "
-                   "Both are counted, never guessed.";
+      string tip = "Memory says what kind of series this is; volatility says how loud. Both are counted, never guessed.";
       if(g_lane[i].ready && g_lane[i].memory == MEM_UNCLEAR)
-         tip = "The two memory estimates disagree, so the lane will not decide on the weather. "
-               "It falls back to requiring both continuation readings to agree.";
-      PanelLine(row, c, tip);
+         tip = "The two memory estimates disagree, so this lane will not decide on the weather. It requires both continuation readings to agree.";
+
+      PAdd(0, " " + Pad(g_lane[i].name, C_TF) + Pad(tr, C_TREND) + Pad(rg, C_REGIME) +
+              Pad(sc, C_SCORE) + Pad(sg, C_SIGNAL) + ho,
+           g_lane[i].ready ? SignalColour(g_lane[i].signal) : clrDimGray, tip);
    }
 
-   PanelLine("", clrWhite, "");
-   PanelLine(" " + Pad("TF", 5) + Pad("SIDE", 6) + Pad("ENTRY", 10) + Pad("LOT", 6) +
-             Pad("TARGET", 19) + Pad("STOP", 18) + "STATE", clrGray,
-             "The plan is rebuilt every closed bar whether or not a trade exists.");
+   //  ---- plan table ---------------------------------------------------
+   PAdd(0, "");
+   PAdd(0, " " + Pad("TF", C_TF) + Pad("SIDE", C_SIDE) + Pad("ENTRY", C_ENTRY) +
+           Pad("LOT", C_LOT) + Pad("TARGET", C_TARGET) + Pad("STOP", C_STOP) + "STATE",
+        clrGray, "The plan is rebuilt on every closed bar, whether or not a trade exists.");
+
    for(int i = 0; i < LANE_COUNT; i++)
    {
       string side = "--", en = "--", lt = "--", tg = "--", sp = "--";
@@ -2793,92 +2890,93 @@ void DrawPanel()
          sp   = DoubleToString(g_plan[i].sl, g_f.digits) + " (" +
                 DoubleToString(MathAbs(g_plan[i].entry - g_plan[i].sl) / g_f.point, 0) + ")";
       }
-      string row = " " + Pad(g_lane[i].name, 5) + Pad(side, 6) + Pad(en, 10) + Pad(lt, 6) +
-                   Pad(tg, 19) + Pad(sp, 18) + PlanStateText(i);
       string tip = "WAIT is not a failure: it is the EA refusing to invent a level it cannot measure.";
       if(!g_lane[i].ready)
-         tip = StringFormat("This lane needs %d closed bars and the terminal has %d. "
-                            "Nothing is claimed until it has them.",
+         tip = StringFormat("This lane needs %d closed bars and the terminal has %d. Nothing is claimed until it has them.",
                             g_lane[i].needBars, g_lane[i].haveBars);
-      PanelLine(row, g_plan[i].ok ? clrWhite : PlanStateColour(i), tip);
+      PAdd(0, " " + Pad(g_lane[i].name, C_TF) + Pad(side, C_SIDE) + Pad(en, C_ENTRY) +
+              Pad(lt, C_LOT) + Pad(tg, C_TARGET) + Pad(sp, C_STOP) + PlanStateText(i),
+           g_plan[i].ok ? clrWhite : PlanStateColour(i), tip);
    }
 
-   PanelLine("", clrWhite, "");
-   PanelLine(" AT THE BROKER (" + g_f.currency + ")", clrGray,
-             "What the terminal actually holds, read back every second. Never what the plan hoped.");
+   //  ---- the broker ---------------------------------------------------
+   PAdd(0, "");
+   PAdd(0, " AT THE BROKER (" + g_f.currency + ")", clrGray,
+        "What the terminal actually holds, read back every second. Never what the plan hoped.");
+
+   bool anyBroker = false;
    for(int i = 0; i < LANE_COUNT; i++)
    {
       if(g_lane[i].state == LS_NONE)
       {
-         PanelLine(" " + Pad(g_lane[i].name, 5) + "none", clrDimGray, "");
+         PAdd(0, " " + Pad(g_lane[i].name, C_TF) + "none", clrDimGray, "");
          continue;
       }
       if(g_lane[i].state == LS_LIMIT && OrderPick(g_lane[i].ticket))
       {
+         anyBroker = true;
          bool bl = (OrdKind() == ORDER_TYPE_BUY_LIMIT);
-         string l1 = " " + Pad(g_lane[i].name, 5) + "Limit " + (bl ? "BUY " : "SELL") +
-                     "  Entry " + DoubleToString(OrdPrice(), g_f.digits) +
-                     "   Lot " + DoubleToString(OrdVolume(), 2);
-         PanelLine(l1, clrDeepSkyBlue, "A resting limit. Three lane-periods of life at most.");
+         PAdd(0, " " + Pad(g_lane[i].name, C_TF) + "Limit " + (bl ? "BUY " : "SELL") +
+                 "  Entry " + DoubleToString(OrdPrice(), g_f.digits) +
+                 "   Lot " + DoubleToString(OrdVolume(), 2),
+              clrDeepSkyBlue, "A resting limit. Three lane-periods of life at most.");
          double toE = bl ? (g_f.ask - OrdPrice()) : (OrdPrice() - g_f.bid);
-         string l2 = "      Bid " + DoubleToString(g_f.bid, g_f.digits) +
-                     "  Ask " + DoubleToString(g_f.ask, g_f.digits) +
-                     "   To entry " + DoubleToString(MathAbs(toE) / g_f.point, 0) + " pts";
-         PanelLine(l2, clrSilver, "");
-         string l3 = "      Target " + DoubleToString(OrdTp(), g_f.digits) +
-                     "   Stop " + DoubleToString(OrdSl(), g_f.digits);
-         PanelLine(l3, clrSilver, "");
+         PAdd(0, "      Bid " + DoubleToString(g_f.bid, g_f.digits) +
+                 "  Ask " + DoubleToString(g_f.ask, g_f.digits) +
+                 "   To entry " + DoubleToString(MathAbs(toE) / g_f.point, 0) + " pts",
+              clrSilver, "");
+         PAdd(0, "      Target " + DoubleToString(OrdTp(), g_f.digits) +
+                 "   Stop " + DoubleToString(OrdSl(), g_f.digits), clrSilver, "");
          continue;
       }
       if(g_lane[i].state == LS_OPEN && g_pos.SelectByTicket(g_lane[i].ticket))
       {
+         anyBroker = true;
          bool isBuy = (g_pos.PositionType() == POSITION_TYPE_BUY);
          double entry = g_pos.PriceOpen();
          double tp = g_pos.TakeProfit();
          double sl = g_pos.StopLoss();
          double pl = g_pos.Profit() + g_pos.Swap();
-         string l1 = " " + Pad(g_lane[i].name, 5) + "Open " + (isBuy ? "BUY " : "SELL") +
-                     "  Entry " + DoubleToString(entry, g_f.digits) +
-                     "   Lot " + DoubleToString(g_pos.Volume(), 2) +
-                     "   P/L " + (pl >= 0 ? "+" : "") + DoubleToString(pl, 2);
-         PanelLine(l1, clrWhite, "P/L is the broker's profit plus swap, in the account currency.");
+         PAdd(0, " " + Pad(g_lane[i].name, C_TF) + "Open " + (isBuy ? "BUY " : "SELL") +
+                 "  Entry " + DoubleToString(entry, g_f.digits) +
+                 "   Lot " + DoubleToString(g_pos.Volume(), 2) +
+                 "   P/L " + (pl >= 0 ? "+" : "") + DoubleToString(pl, 2),
+              clrWhite, "P/L is the broker's profit plus swap, in the account currency.");
          double toT = isBuy ? (tp - g_f.bid) : (g_f.ask - tp);
-         string l2 = "      Bid " + DoubleToString(g_f.bid, g_f.digits) +
-                     "  Ask " + DoubleToString(g_f.ask, g_f.digits) +
-                     "   To target " + DoubleToString(MathAbs(toT) / g_f.point, 0) + " pts";
-         PanelLine(l2, clrSilver, "");
-         string l3 = "      Target " + DoubleToString(tp, g_f.digits) +
-                     "   Stop " + DoubleToString(sl, g_f.digits) +
-                     "   TP1 " + (g_lane[i].tp1Done ? "done" : "pending");
-         PanelLine(l3, clrSilver, "");
+         PAdd(0, "      Bid " + DoubleToString(g_f.bid, g_f.digits) +
+                 "  Ask " + DoubleToString(g_f.ask, g_f.digits) +
+                 "   To target " + DoubleToString(MathAbs(toT) / g_f.point, 0) + " pts",
+              clrSilver, "");
+         PAdd(0, "      Target " + DoubleToString(tp, g_f.digits) +
+                 "   Stop " + DoubleToString(sl, g_f.digits) +
+                 "   TP1 " + (g_lane[i].tp1Done ? "done" : "pending"), clrSilver, "");
       }
    }
+   if(!anyBroker) { }
 
-   PanelLine("", clrWhite, "");
-   string t1 = StringFormat(" RECORD  today  calls %dR/%dW   trades %dW/%dL",
-                            g_todayS[0][0] + g_todayS[1][0] + g_todayS[2][0],
-                            g_todayS[0][1] + g_todayS[1][1] + g_todayS[2][1],
-                            g_todayW[0] + g_todayW[1] + g_todayW[2],
-                            g_todayL[0] + g_todayL[1] + g_todayL[2]);
-   PanelLine(t1, clrWhite, "Every call is checked a few bars later and written down, right or wrong.");
-   string t2 = StringFormat("          all   calls %dR/%dW   trades %dW/%dL",
-                            g_allS[0][0] + g_allS[1][0] + g_allS[2][0],
-                            g_allS[0][1] + g_allS[1][1] + g_allS[2][1],
-                            g_allW[0] + g_allW[1] + g_allW[2],
-                            g_allL[0] + g_allL[1] + g_allL[2]);
-   PanelLine(t2, clrWhite, "");
+   //  ---- record -------------------------------------------------------
+   PAdd(0, "");
+   PAdd(0, StringFormat(" RECORD   today  calls %dR/%dW   trades %dW/%dL",
+                        g_todayS[0][0] + g_todayS[1][0] + g_todayS[2][0],
+                        g_todayS[0][1] + g_todayS[1][1] + g_todayS[2][1],
+                        g_todayW[0] + g_todayW[1] + g_todayW[2],
+                        g_todayL[0] + g_todayL[1] + g_todayL[2]),
+        clrWhite, "Every call is checked a few bars later and written down, right or wrong.");
+   PAdd(0, StringFormat("          all    calls %dR/%dW   trades %dW/%dL",
+                        g_allS[0][0] + g_allS[1][0] + g_allS[2][0],
+                        g_allS[0][1] + g_allS[1][1] + g_allS[2][1],
+                        g_allW[0] + g_allW[1] + g_allW[2],
+                        g_allL[0] + g_allL[1] + g_allL[2]),
+        clrWhite, "");
+   PAdd(0, " READINGS  MOM " + ReadScoreText(0) + "   PUSH " + ReadScoreText(1) +
+           "   STRT " + ReadScoreText(2), clrGray,
+        "How often each reading was on the right side, counted from the record. A * means the bounded tweak stopped it counting after it fell below a coin flip.");
+   PAdd(0, " " + g_recNote + "  |  Tweak: " + (InpTweakArm ? "armed" : "off") +
+           "  |  Last bar " + TimeToString(ServerNow(), TIME_MINUTES) + " server", clrGray,
+        "The record is a file beside the terminal's data folder. It only ever watches.");
 
-   string t3 = " Readings  MOM " + ReadScoreText(0) + "   PUSH " + ReadScoreText(1) +
-               "   STRT " + ReadScoreText(2);
-   PanelLine(t3, clrGray,
-             "How often each reading was on the right side, counted from the record. "
-             "A * means the bounded tweak stopped it counting after it fell below a coin flip.");
-
-   string t4 = " " + g_recNote + " | Tweak: " + (InpTweakArm ? "armed" : "off") +
-               " | Last closed bar " + TimeToString(ServerNow(), TIME_MINUTES) + " server";
-   PanelLine(t4, clrGray, "");
-
-   PanelTrim();
+   g_panelH = PRender(0, PANEL_PREFIX, PANEL_X, PANEL_Y);
+   g_panelW = PWidth(0) * (int)MathRound(FONT_SIZE * 0.80) + 2 * PANEL_PAD;
 }
 
 //====================================================================
@@ -2886,74 +2984,51 @@ void DrawPanel()
 //====================================================================
 void DrawDetails()
 {
-   int x = PANEL_X + 640;
-   int y = PANEL_Y;
-   int k = 0;
+   PBegin(1);
+   if(!InpDiaryDetails) { PRender(1, DETAIL_PREFIX, 0, 0); return; }
 
-   if(!InpDiaryDetails) return;
+   PAdd(1, " READING DETAIL", clrGray, "");
+   PAdd(1, "  momentum : MACD divided by its own", clrSilver, "");
+   PAdd(1, "             volatility, x100", clrSilver, "");
+   PAdd(1, "  push     : directional movement,", clrSilver, "");
+   PAdd(1, "             Wilder smoothing", clrSilver, "");
+   PAdd(1, "  stretch  : position in the envelope", clrSilver, "");
 
-   string lines[];
-   color cols[];
-   ArrayResize(lines, 40);
-   ArrayResize(cols, 40);
-
-   lines[k] = " READING DETAIL";                       cols[k] = clrGray;       k++;
-   lines[k] = " momentum : MACD divided by its own";   cols[k] = clrSilver;     k++;
-   lines[k] = "            volatility, x100";          cols[k] = clrSilver;     k++;
-   lines[k] = " push     : directional movement,";     cols[k] = clrSilver;     k++;
-   lines[k] = "            Wilder smoothing";          cols[k] = clrSilver;     k++;
-   lines[k] = " stretch  : position in the envelope";  cols[k] = clrSilver;     k++;
-   lines[k] = "";                                      cols[k] = clrSilver;     k++;
-
-   for(int i = 0; i < LANE_COUNT && k < 38; i++)
+   for(int i = 0; i < LANE_COUNT; i++)
    {
       if(!g_lane[i].ready) continue;
-      lines[k] = " " + g_lane[i].name;
-      cols[k] = clrWhite; k++;
-      lines[k] = StringFormat("   mom %+.1f  push %+.1f  stretch %+.2f",
-                              g_lane[i].momValue, g_lane[i].pushValue, g_lane[i].stretchValue);
-      cols[k] = clrSilver; k++;
-      lines[k] = StringFormat("   votes %+d %+d %+d   memory %s",
-                              g_lane[i].vMom, g_lane[i].vPush, g_lane[i].vStretch,
-                              MemoryWord(g_lane[i].memory));
-      cols[k] = clrSilver; k++;
-      lines[k] = StringFormat("   hurst %.2f / %.2f  vr %.2f",
-                              g_lane[i].hurstDfa, g_lane[i].hurstRs, g_lane[i].varRatio);
-      cols[k] = clrSilver; k++;
-      if(g_lane[i].reachN > 0 && k < 38)
-      {
-         lines[k] = StringFormat("   analogue reach %.0f%% of %d",
-                                 g_lane[i].reachPct, g_lane[i].reachN);
-         cols[k] = clrSilver; k++;
-      }
-      if(k < 38)
-      {
-         lines[k] = StringFormat("   record  mom %s  push %s  strt %s",
-                                 ReadScoreText(0), ReadScoreText(1), ReadScoreText(2));
-         cols[k] = clrSilver; k++;
-      }
-      k++;
+      PAdd(1, "");
+      PAdd(1, " " + g_lane[i].name, clrWhite, "");
+      PAdd(1, StringFormat("   mom %+.1f   push %+.1f   stretch %+.2f",
+                           g_lane[i].momValue, g_lane[i].pushValue, g_lane[i].stretchValue),
+           clrSilver, "The raw reading values, before any percentile is applied.");
+      PAdd(1, StringFormat("   votes %+d %+d %+d   memory %s",
+                           g_lane[i].vMom, g_lane[i].vPush, g_lane[i].vStretch,
+                           MemoryWord(g_lane[i].memory)),
+           clrSilver, "");
+      PAdd(1, StringFormat("   hurst %.2f / %.2f   vr %.2f",
+                           g_lane[i].hurstDfa, g_lane[i].hurstRs, g_lane[i].varRatio),
+           clrSilver, "Detrended fluctuation, rescaled range, and the variance ratio. A disagreement reads Unclear.");
+      if(g_lane[i].reachN > 0)
+         PAdd(1, StringFormat("   analogue reach %.0f%% of %d",
+                              g_lane[i].reachPct, g_lane[i].reachN), clrSilver, "");
    }
 
-   for(int i = 0; i < k; i++)
+   //  Beside the main panel when there is room, below it when there is not.
+   //  Never drawn off the edge of the chart.
+   int cw = (int)MathRound(FONT_SIZE * 0.80);
+   if(cw < 6) cw = 6;
+   int need = PWidth(1) * cw + 2 * PANEL_PAD;
+   int chartW = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+
+   int dx = PANEL_X + g_panelW + 14;
+   int dy = PANEL_Y;
+   if(chartW > 0 && dx + need > chartW - 8)
    {
-      string name = DETAIL_PREFIX + IntegerToString(i);
-      if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y + i * (FONT_SIZE + 6));
-      ObjectSetString (0, name, OBJPROP_TEXT, lines[i]);
-      ObjectSetString (0, name, OBJPROP_FONT, FONT_NAME);
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE, FONT_SIZE);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, cols[i]);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+      dx = PANEL_X;
+      dy = PANEL_Y + g_panelH + 10;
    }
-   for(int i = k; i < 60; i++)
-   {
-      string name = DETAIL_PREFIX + IntegerToString(i);
-      if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-   }
+   PRender(1, DETAIL_PREFIX, dx, dy);
 }
 
 //====================================================================
@@ -3046,6 +3121,11 @@ void Heartbeat()
       g_lastDraw = GetTickCount();
       DrawPanel();
       DrawDetails();
+
+      //  Without this the chart only repaints when a tick arrives. On a closed
+      //  market, or a quiet symbol, no tick means no repaint - which is exactly
+      //  why the panel was invisible whenever the market was shut.
+      ChartRedraw();
    }
 }
 
