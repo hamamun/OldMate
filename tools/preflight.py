@@ -227,6 +227,25 @@ for m in re.finditer(r"\b(g_\w+)\s*(?:\[[^\]]*\])?\s*\.\s*(\w+)", s):
         line = s[:m.start()].count("\n") + 1
         bad_fields.append(f"{var}.{field} at line {line} (not a field of {t})")
 chk("every struct field read exists", not bad_fields, "; ".join(sorted(set(bad_fields))[:6]))
+
+#  Mirror of the check above: a field that is only ever assigned is storage
+#  nobody sees.  durabPct was computed from the analogue replay on every bar
+#  and never displayed, so a panel number the documentation promised did not
+#  exist.  '==' is a comparison and counts as a read; only a single '=' writes.
+dead_fields = []
+for tname, fset in structs.items():
+    if not tname.startswith(("Lane", "Market", "Plan", "Record", "Session")):
+        continue
+    for field in fset:
+        uses = [m for m in re.finditer(r"\.\s*" + field + r"(?![\w])", s)]
+        reads = [m for m in uses
+                 if not re.match(r"\s*(?:[-+*/]?=(?!=)|\+\+|--)",
+                                 s[m.end():m.end() + 6])]
+        if uses and not reads:
+            dead_fields.append(f"{tname}.{field}")
+chk("every struct field is read, not only written", not dead_fields,
+    ", ".join(sorted(set(dead_fields))))
+
 print(f"      {len(structs)} structs checked")
 
 print()
@@ -237,6 +256,32 @@ macros = re.findall(r"^#define\s+(\w+)\s+(.+)$", s, re.M)
 dead = [n for n, _ in macros
         if len(re.findall(r"(?<![\w])" + n + r"(?![\w])", s)) < 2]
 chk("no #define is declared and never used", not dead, ", ".join(dead))
+
+print()
+print("=" * 70)
+print("DEAD GLOBALS  (a global that is written and never read)")
+print("=" * 70)
+# Found the hard way: g_unit was assigned on every bar and never read, so the
+# "measured unit" the design document talked about was doing nothing at all.
+# A global is dead if every mention after its declaration is an assignment.
+global_decl = re.findall(r"^([A-Za-z_]\w*)\s+(g_\w+)(?:\[[^\]]*\])?\s*(?:=|;)", s, re.M)
+dead_globals = []
+for _type, name in set(global_decl):
+    lines = [ln for ln in s.splitlines()
+             if re.search(r"(?<![\w])" + name + r"(?![\w])", ln)]
+    if not lines:
+        continue
+    decl_like = [ln for ln in lines
+                 if re.match(r"^\s*[A-Za-z_]\w*\s+" + name + r"\b", ln)]
+    body = [ln for ln in lines if ln not in decl_like]
+    #  A line that begins with the name and an assignment operator is a write.
+    #  Anything else - a comparison, an argument, a struct field - is a read.
+    write = lambda ln: re.match(
+        r"^\s*" + name + r"(?:\[[^\]]*\])?\s*(?:[-+*/]?=|\+\+|--)", ln) is not None
+    reads = [ln for ln in body if not write(ln)]
+    if body and not reads:
+        dead_globals.append(name)
+chk("every global is read, not only written", not dead_globals, ", ".join(sorted(dead_globals)))
 
 print()
 print("=" * 70)
