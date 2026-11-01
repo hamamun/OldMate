@@ -94,10 +94,12 @@ print("=" * 70)
 # function definitions at file scope: "type name(args)" followed by a body brace
 defs = {}
 for m in re.finditer(r"^[ \t]*(?:static\s+)?(?:const\s+)?"
-                     r"(void|bool|int|long|ulong|double|string|color|datetime|uint|ushort)\s+"
+                     r"([A-Za-z_]\w*)\s+"
                      r"([A-Za-z_]\w*)\s*\(([^;{)]*)\)\s*\{",
                      s, re.M):
-    name, params = m.group(2), m.group(3)
+    rtype, name, params = m.group(1), m.group(2), m.group(3)
+    if rtype in ("if", "for", "while", "switch", "return", "else", "do"):
+        continue
     defs.setdefault(name, []).append(params)
 
 dups = [k for k, v in defs.items() if len(v) > 1]
@@ -172,6 +174,7 @@ TimeTradeServer TimeGMT TimeLocal TimeCurrent TimeToStruct StructToTime
 PositionsTotal OrdersTotal HistorySelect HistorySelectByPosition HistoryDealsTotal
 HistoryDealGetTicket HistoryDealGetDouble HistoryDealGetInteger
 PositionSelectByTicket PositionGetDouble PositionGetInteger PositionGetString
+OrderSelect OrderGetTicket OrderGetDouble OrderGetInteger OrderGetString
 EnumToString GetTickCount EventSetTimer EventKillTimer
 OrderCalcProfit OrderCalcMargin OrderSend OrderCheck
 SetExpertMagicNumber SetDeviationInPoints SetTypeFilling

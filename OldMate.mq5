@@ -25,7 +25,6 @@
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
-#include <Trade\OrderInfo.mqh>
 #include <Trade\SymbolInfo.mqh>
 
 //====================================================================
@@ -268,7 +267,20 @@ datetime      g_lastDraw     = 0;
 string        g_currency  = "USD";
 CTrade        g_trade;
 CPositionInfo g_pos;
-COrderInfo    g_ord;
+
+//  Pending orders are read through the built-in order functions rather than
+//  COrderInfo: not every MetaTrader build gives COrderInfo a SelectByTicket,
+//  and the built-in calls are guaranteed. One accessor each, so the rest of
+//  the file does not care which one is used.
+bool OrderPick(ulong ticket)   { return(OrderSelect(ticket)); }
+string OrdSymbol()             { return(OrderGetString(ORDER_SYMBOL)); }
+long   OrdMagic()              { return(OrderGetInteger(ORDER_MAGIC)); }
+double OrdPrice()              { return(OrderGetDouble(ORDER_PRICE_OPEN)); }
+double OrdSl()                 { return(OrderGetDouble(ORDER_SL)); }
+double OrdTp()                 { return(OrderGetDouble(ORDER_TP)); }
+double OrdVolume()             { return(OrderGetDouble(ORDER_VOLUME_CURRENT)); }
+datetime OrdSetupTime()        { return((datetime)OrderGetInteger(ORDER_TIME_SETUP)); }
+ENUM_ORDER_TYPE OrdKind()      { return((ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE)); }
 
 //  Panel bookkeeping
 string        g_line[];
@@ -528,7 +540,12 @@ double SpreadBaseline(int hour, int &samples)
 {
    samples = g_sprN[hour];
    if(samples < 20) return(0.0);
-   return(MedianOf(g_spr[hour], samples));
+   //  MQL5 cannot pass one row of a 2-D array by reference, so the row is
+   //  copied first. The copy is the same data, not a different measurement.
+   double row[];
+   ArrayResize(row, samples);
+   for(int i = 0; i < samples; i++) row[i] = g_spr[hour][i];
+   return(MedianOf(row, samples));
 }
 
 //====================================================================
@@ -540,7 +557,7 @@ void ReadSessions()
    datetime now = TimeTradeServer();
    MqlDateTime st;
    TimeToStruct(now, st);
-   datetime midnight = now - (st.hour * 3600 + st.min * 60 + st.sec);
+   datetime midnight = (datetime)((long)now - (long)(st.hour * 3600 + st.min * 60 + st.sec));
 
    for(int dow = 0; dow < 7 && g_sessCount < MAX_SESSIONS; dow++)
    {
@@ -580,7 +597,7 @@ bool IsOpenNow(datetime serverNow, datetime &untilEnd, datetime &nextOpen)
       if(sec >= g_sess[i].startSec && sec < g_sess[i].endSec)
       {
          open = true;
-         datetime end = serverNow - sec + g_sess[i].endSec;
+         datetime end = (datetime)((long)serverNow - (long)sec + (long)g_sess[i].endSec);
          if(untilEnd == 0 || end < untilEnd) untilEnd = end;
       }
    }
@@ -593,8 +610,8 @@ bool IsOpenNow(datetime serverNow, datetime &untilEnd, datetime &nextOpen)
       for(int i = 0; i < g_sessCount; i++)
       {
          if(g_sess[i].dow != dow) continue;
-         datetime base = serverNow - sec + (datetime)(add * 86400);
-         datetime s = base + g_sess[i].startSec;
+         datetime base = (datetime)((long)serverNow - (long)sec + (long)add * 86400);
+         datetime s = (datetime)((long)base + (long)g_sess[i].startSec);
          if(s > serverNow) { if(nextOpen == 0 || s < nextOpen) nextOpen = s; }
       }
    }
@@ -665,9 +682,10 @@ void RefreshMarket()
    bool open = IsOpenNow(ServerNow(), untilEnd, nextOpen);
 
    bool connected = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
-   bool tradeable = (g_f.tradeMode != SYMBOL_TRADE_DISABLED);
+   bool tradeable = (g_f.tradeMode != SYMBOL_TRADE_MODE_DISABLED);
    bool stale     = false;
-   if(g_f.lastQuote > 0 && TimeTradeServer() - g_f.lastQuote > (int)(STALE_MINUTES * 60))
+   if(g_f.lastQuote > 0 &&
+      (long)TimeTradeServer() - (long)g_f.lastQuote > (long)(STALE_MINUTES * 60))
       stale = true;
    if(g_f.lastQuote == 0) stale = true;
 
@@ -1491,7 +1509,8 @@ void GradePending(int idx, double closeNow)
    {
       if(g_pendLane[i] != idx) continue;
       //  Bars elapsed on this lane's timeframe.
-      int bars = (int)((g_lane[idx].lastBar - g_pendTime[i]) / PeriodSeconds(g_lane[idx].tf));
+      int bars = (int)(((long)g_lane[idx].lastBar - (long)g_pendTime[i]) /
+                       (long)PeriodSeconds(g_lane[idx].tf));
       if(bars < DURA_BARS) continue;
 
       double move = closeNow - g_pendLevel[i];
@@ -2131,9 +2150,10 @@ bool HasOurOrder(int idx)
 {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
-      if(!g_ord.SelectByIndex(i)) continue;
-      if(g_ord.Symbol() != _Symbol) continue;
-      if(g_ord.Magic() == LaneMagic(idx)) return(true);
+      ulong t = OrderGetTicket(i);
+      if(t == 0 || !OrderPick(t)) continue;
+      if(OrdSymbol() != _Symbol) continue;
+      if(OrdMagic() == (long)LaneMagic(idx)) return(true);
    }
    return(false);
 }
@@ -2215,9 +2235,10 @@ void TradeSync(int idx)
          {
             for(int i = OrdersTotal() - 1; i >= 0; i--)
             {
-               if(!g_ord.SelectByIndex(i)) continue;
-               if(g_ord.Symbol() != _Symbol || g_ord.Magic() != LaneMagic(idx)) continue;
-               g_lane[idx].ticket = g_ord.Ticket();
+               ulong t = OrderGetTicket(i);
+               if(t == 0 || !OrderPick(t)) continue;
+               if(OrdSymbol() != _Symbol || OrdMagic() != (long)LaneMagic(idx)) continue;
+               g_lane[idx].ticket = t;
                break;
             }
             g_lane[idx].state = LS_LIMIT;
@@ -2239,7 +2260,7 @@ void FlushGrades(int idx)
 {
    if(g_fill[idx].ticket == 0) return;
 
-   if(!HistorySelectByPosition(g_fill[idx].ticket))
+   if(!HistorySelectByPosition((long)g_fill[idx].ticket))
    {
       g_fill[idx].tries++;
       if(g_fill[idx].tries > 20) g_fill[idx].ticket = 0;
@@ -2318,7 +2339,9 @@ bool SendPlan(int idx)
    else
    {
       ENUM_ORDER_TYPE t = (g_plan[idx].dir > 0) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
-      datetime expiry = TimeTradeServer() + (datetime)(3 * PeriodSeconds(g_lane[idx].tf));
+      //  Two datetimes cannot be added. Add in long, then cast back.
+      datetime expiry = (datetime)((long)TimeTradeServer() +
+                                   (long)(3 * PeriodSeconds(g_lane[idx].tf)));
       sent = g_trade.OrderOpen(_Symbol, t, g_plan[idx].lot, g_plan[idx].entry,
                                g_plan[idx].sl, g_plan[idx].tp, ORDER_TIME_SPECIFIED, expiry,
                                "OldMate " + g_lane[idx].name);
@@ -2355,11 +2378,11 @@ void RepriceLimit(int idx)
    if(!g_plan[idx].ok || g_plan[idx].market) return;
 
    double tick = g_f.tick > 0.0 ? g_f.tick : g_f.point;
-   if(!g_ord.SelectByTicket(g_lane[idx].ticket)) return;
+   if(!OrderPick(g_lane[idx].ticket)) return;
 
-   double nowEntry = g_ord.PriceOpen();
-   double nowSl    = g_ord.StopLoss();
-   double nowTp    = g_ord.TakeProfit();
+   double nowEntry = OrdPrice();
+   double nowSl    = OrdSl();
+   double nowTp    = OrdTp();
 
    bool moved = (MathAbs(nowEntry - g_plan[idx].entry) >= 0.5 * tick) ||
                 (MathAbs(nowSl - g_plan[idx].sl) >= 0.5 * tick) ||
@@ -2367,10 +2390,11 @@ void RepriceLimit(int idx)
    if(!moved) return;
 
    g_trade.SetExpertMagicNumber(LaneMagic(idx));
+   datetime newExp = (datetime)((long)TimeTradeServer() +
+                                (long)(3 * PeriodSeconds(g_lane[idx].tf)));
    if(g_trade.OrderModify(g_lane[idx].ticket, g_plan[idx].entry,
                           g_plan[idx].sl, g_plan[idx].tp,
-                          ORDER_TIME_SPECIFIED,
-                          TimeTradeServer() + (datetime)(3 * PeriodSeconds(g_lane[idx].tf))))
+                          ORDER_TIME_SPECIFIED, newExp))
    {
       g_lane[idx].origRisk = MathAbs(g_plan[idx].entry - g_plan[idx].sl);
    }
@@ -2440,12 +2464,12 @@ void ManageSecond(int idx)
          CancelLane(idx, "permission withdrawn");
          return;
       }
-      if(!g_ord.SelectByTicket(g_lane[idx].ticket)) { TradeSync(idx); return; }
+      if(!OrderPick(g_lane[idx].ticket)) { TradeSync(idx); return; }
 
-      datetime placed = g_ord.TimeSetup();
+      datetime placed = OrdSetupTime();
       if(placed > 0)
       {
-         int life = (int)(TimeTradeServer() - placed);
+         int life = (int)((long)TimeTradeServer() - (long)placed);
          if(life > 3 * PeriodSeconds(g_lane[idx].tf))
          {
             CancelLane(idx, "expired on the clock");
@@ -2456,9 +2480,10 @@ void ManageSecond(int idx)
       //  The market walked through the price it rests at.
       double tick = g_f.tick > 0.0 ? g_f.tick : g_f.point;
       double buff = MathMax(tick, g_f.ask - g_f.bid);
-      bool buyLimit = (g_ord.OrderType() == ORDER_TYPE_BUY_LIMIT);
-      if(buyLimit && g_f.bid < g_ord.PriceOpen() - buff)  { CancelLane(idx, "walked through"); return; }
-      if(!buyLimit && g_f.ask > g_ord.PriceOpen() + buff) { CancelLane(idx, "walked through"); return; }
+      bool buyLimit = (OrdKind() == ORDER_TYPE_BUY_LIMIT);
+      double rest   = OrdPrice();
+      if(buyLimit && g_f.bid < rest - buff)  { CancelLane(idx, "walked through"); return; }
+      if(!buyLimit && g_f.ask > rest + buff) { CancelLane(idx, "walked through"); return; }
       return;
    }
 
@@ -2783,20 +2808,20 @@ void DrawPanel()
          PanelLine(" " + Pad(g_lane[i].name, 5) + "none", clrDimGray, "");
          continue;
       }
-      if(g_lane[i].state == LS_LIMIT && g_ord.SelectByTicket(g_lane[i].ticket))
+      if(g_lane[i].state == LS_LIMIT && OrderPick(g_lane[i].ticket))
       {
-         bool bl = (g_ord.OrderType() == ORDER_TYPE_BUY_LIMIT);
+         bool bl = (OrdKind() == ORDER_TYPE_BUY_LIMIT);
          string l1 = " " + Pad(g_lane[i].name, 5) + "Limit " + (bl ? "BUY " : "SELL") +
-                     "  Entry " + DoubleToString(g_ord.PriceOpen(), g_f.digits) +
-                     "   Lot " + DoubleToString(g_ord.VolumeCurrent(), 2);
+                     "  Entry " + DoubleToString(OrdPrice(), g_f.digits) +
+                     "   Lot " + DoubleToString(OrdVolume(), 2);
          PanelLine(l1, clrDeepSkyBlue, "A resting limit. Three lane-periods of life at most.");
-         double toE = bl ? (g_f.ask - g_ord.PriceOpen()) : (g_ord.PriceOpen() - g_f.bid);
+         double toE = bl ? (g_f.ask - OrdPrice()) : (OrdPrice() - g_f.bid);
          string l2 = "      Bid " + DoubleToString(g_f.bid, g_f.digits) +
                      "  Ask " + DoubleToString(g_f.ask, g_f.digits) +
                      "   To entry " + DoubleToString(MathAbs(toE) / g_f.point, 0) + " pts";
          PanelLine(l2, clrSilver, "");
-         string l3 = "      Target " + DoubleToString(g_ord.TakeProfit(), g_f.digits) +
-                     "   Stop " + DoubleToString(g_ord.StopLoss(), g_f.digits);
+         string l3 = "      Target " + DoubleToString(OrdTp(), g_f.digits) +
+                     "   Stop " + DoubleToString(OrdSl(), g_f.digits);
          PanelLine(l3, clrSilver, "");
          continue;
       }
@@ -2951,19 +2976,22 @@ void Heartbeat()
    UpdateQuote();
    g_f.equity = AccountInfoDouble(ACCOUNT_EQUITY);
 
-   if(g_lastSample == 0 || TimeTradeServer() - g_lastSample >= SPREAD_SAMPLE_SEC)
+   if(g_lastSample == 0 ||
+      (long)TimeTradeServer() - (long)g_lastSample >= (long)SPREAD_SAMPLE_SEC)
    {
       SampleSpread();
       g_lastSample = TimeTradeServer();
    }
 
-   if(g_lastRefTable == 0 || TimeTradeServer() - g_lastRefTable >= REFRESH_SEC)
+   if(g_lastRefTable == 0 ||
+      (long)TimeTradeServer() - (long)g_lastRefTable >= (long)REFRESH_SEC)
    {
       RefreshMarket();
       g_lastRefTable = TimeTradeServer();
    }
 
-   if(g_lastSession == 0 || TimeTradeServer() - g_lastSession >= SESSION_SEC)
+   if(g_lastSession == 0 ||
+      (long)TimeTradeServer() - (long)g_lastSession >= (long)SESSION_SEC)
    {
       ReadSessions();
       g_lastSession = TimeTradeServer();
@@ -3033,7 +3061,8 @@ int OnInit()
 
    for(int i = 0; i < LANE_COUNT; i++)
    {
-      g_lane[i].tf      = (i == 0) ? PERIOD_M5 : ((i == 1) ? PERIOD_M15 : PERIOD_M30);
+      g_lane[i].tf      = (ENUM_TIMEFRAMES)((i == 0) ? PERIOD_M5
+                                          : ((i == 1) ? PERIOD_M15 : PERIOD_M30));
       g_lane[i].name    = (i == 0) ? "M5 " : ((i == 1) ? "M15" : "M30");
       g_lane[i].ready   = false;
       g_lane[i].lastBar = 0;
