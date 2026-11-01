@@ -17,7 +17,7 @@ MT uses the same three.
 Left to right:
 
 ```text
- MT V1.00 | XAUUSDm | Metal | OPEN | Se 08:00-17:00 | 14:35:07 srv
+ MT V1.00 | XAUUSDm | Metal | OPEN | 2026.11.01 11:57:34
 ```
 
 | Cell | Content |
@@ -26,24 +26,15 @@ Left to right:
 | Symbol name | the broker's own spelling |
 | Symbol type | Forex / Metal / Index / Energy / Crypto / Stock / Other |
 | `OPEN` / `CLOSED` | market state |
-| `Se` | the broker's own session window for today, in server time |
-| `14:35:07 srv` | live server time, ticking every second |
+| `2026.11.01 11:57:34` | server time and date, in the terminal's own format, ticking every second |
 
-66 characters — about 528 px at 10 pt.
+56 characters — about 448 px at 10 pt. The date and time are fixed width, so the cell never
+shifts as the seconds change.
 
 The clock is the sync check: it ticks every second while the terminal is connected, and freezes
 when it is not, so a stopped clock beside `OPEN` says the panel is reading stale data.
 
-When the market is shut the state cell reads `CLOSED` and the window is still shown, so the owner
-can see when it reopens:
-
 ```text
- MT V1.00 | XAUUSDm | Metal | CLOSED | Se 08:00-17:00 | 14:35:07 srv
-```
-
-When the broker publishes no session table — crypto, usually — the cell says so instead of
-inventing a window:
-
-```text
- MT V1.00 | BTCUSDm | Crypto | OPEN | Se - no table - | 14:35:07 srv
+ MT V1.00 | XAUUSDm | Metal | CLOSED | 2026.11.01 11:57:34
+ MT V1.00 | BTCUSDm | Crypto | OPEN | 2026.11.01 11:57:34
 ```
