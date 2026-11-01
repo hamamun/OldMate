@@ -28,7 +28,7 @@
 #include <Trade\SymbolInfo.mqh>
 
 //====================================================================
-//  SWITCHES - nine, all on/off, all safe at their default forever
+//  SWITCHES - ten, all on/off, all safe at their default forever
 //====================================================================
 input bool   InpAutoTrade    = true;   // Autotrading (master switch)
 input bool   InpAllowM5      = true;   // Allow M5 autotrade
@@ -39,6 +39,7 @@ input bool   InpTp1Tp2       = true;   // TP1 partial + TP2
 input bool   InpDiaryDetails = true;   // Diary details
 input bool   InpTweakArm     = false;  // Tweak (arm one bounded self-tweak)
 input bool   InpMinLot       = false;  // Minimum lot
+input bool   InpBypassRisk   = false;  // Bypass risk budget
 
 //====================================================================
 //  CONSTANTS
@@ -48,6 +49,9 @@ input bool   InpMinLot       = false;  // Minimum lot
 #define DETAIL_PREFIX      "OMD_"
 #define PANEL_X            12
 #define PANEL_Y            22
+//  Shown on the panel and printed at attach.  A field report is only readable
+//  if both sides know which build produced it.
+#define EA_BUILD           "1.08"
 #define FONT_NAME          "Consolas"
 #define FONT_SIZE          9
 #define DRAW_MIN_MS        1000
@@ -228,7 +232,8 @@ struct LanePlan
    double   tp;
    double   tp1;
    double   lot;
-   string   note;
+   string   note;         // why there is no usable plan
+   string   diag;         // the numbers behind that reason, shown on hover
 };
 
 struct LaneFill
@@ -247,8 +252,15 @@ AssetProfile  g_base;
 AssetProfile  g_p;
 MarketState   g_m;
 
-SessionRec    g_sess[MAX_SESSIONS];
-int           g_sessCount = 0;
+//  MT5 publishes TWO tables per symbol and they answer different questions:
+//    quote sessions - when the broker is quoting, i.e. when the market is OPEN
+//    trade sessions - when the broker accepts orders, i.e. when we may SEND
+//  They are frequently not the same, and either one may be empty. Reading only
+//  the trade table made every symbol look like it had no sessions at all.
+SessionRec    g_sessQ[MAX_SESSIONS];  // quote table: is the market open
+SessionRec    g_sessT[MAX_SESSIONS];  // trade table: may an order be sent
+int           g_sessQN = 0;
+int           g_sessTN = 0;
 
 LaneState     g_lane[LANE_COUNT];
 LanePlan      g_plan[LANE_COUNT];
@@ -543,73 +555,143 @@ double SpreadBaseline(int hour, int &samples)
 //====================================================================
 //  SESSIONS  - the broker's own table, never a guess
 //====================================================================
-void ReadSessions()
+//  One day's worth of session records, in seconds since local midnight.
+//  A "to" of 00:00 means midnight at the end of that day, so 86400, not zero.
+int ReadOneTable(bool wantTrade, SessionRec &out[], int maxOut)
 {
-   g_sessCount = 0;
-   datetime now = TimeTradeServer();
-   MqlDateTime st;
-   TimeToStruct(now, st);
-   datetime midnight = (datetime)((long)now - (long)(st.hour * 3600 + st.min * 60 + st.sec));
-
-   for(int dow = 0; dow < 7 && g_sessCount < MAX_SESSIONS; dow++)
+   int n = 0;
+   for(int dow = 0; dow < 7 && n < maxOut; dow++)
    {
-      for(uint idx = 0; idx < 4 && g_sessCount < MAX_SESSIONS; idx++)
+      //  Indices are contiguous from zero; the first failure ends the day.
+      for(uint idx = 0; idx < 8; idx++)
       {
          datetime from = 0, to = 0;
-         if(!SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, idx, from, to)) continue;
+         bool got = wantTrade
+                    ? SymbolInfoSessionTrade(_Symbol, (ENUM_DAY_OF_WEEK)dow, idx, from, to)
+                    : SymbolInfoSessionQuote(_Symbol, (ENUM_DAY_OF_WEEK)dow, idx, from, to);
+         if(!got) break;
+
          MqlDateTime f, t;
          TimeToStruct(from, f);
-         TimeToStruct(to, t);
-         int startSec = f.hour * 3600 + f.min * 60;
-         int endSec   = t.hour * 3600 + t.min * 60;
-         if(startSec == 0 && endSec == 0) continue;
-         g_sess[g_sessCount].dow      = dow;
-         g_sess[g_sessCount].startSec = startSec;
-         g_sess[g_sessCount].endSec   = (endSec == 0) ? 86400 : endSec;
-         g_sessCount++;
+         TimeToStruct(to,   t);
+         int sSec = f.hour * 3600 + f.min * 60;
+         int eSec = t.hour * 3600 + t.min * 60;
+         if(eSec == 0) eSec = 86400;             // 00:00 = midnight = end of day
+
+         if(n >= maxOut) return(n);
+         out[n].dow      = dow;
+         out[n].startSec = sSec;
+         out[n].endSec   = eSec;
+         n++;
       }
    }
+   return(n);
+}
+
+string DayName(int dow)
+{
+   switch(dow)
+   {
+      case 0: return("Sun");
+      case 1: return("Mon");
+      case 2: return("Tue");
+      case 3: return("Wed");
+      case 4: return("Thu");
+      case 5: return("Fri");
+      case 6: return("Sat");
+   }
+   return("?");
+}
+
+void DumpSessions(string label, SessionRec &tab[], int n)
+{
+   if(n == 0) { PrintFormat("OldMate %s: published table is empty", label); return; }
+   string line = "";
+   for(int i = 0; i < n && i < 8; i++)
+      line += StringFormat(" | %s %02d:%02d-%02d:%02d", DayName(tab[i].dow),
+                           tab[i].startSec / 3600, (tab[i].startSec % 3600) / 60,
+                           tab[i].endSec / 3600, (tab[i].endSec % 3600) / 60);
+   PrintFormat("OldMate %s: %d records%s", label, n, line);
+}
+
+void ReadSessions()
+{
+   g_sessQN = ReadOneTable(false, g_sessQ, MAX_SESSIONS);
+   g_sessTN = ReadOneTable(true,  g_sessT, MAX_SESSIONS);
    g_lastSession = TimeTradeServer();
+
+   //  Say it once, in the Experts log, so the reason for a status is never a
+   //  mystery: which table the broker actually publishes for this symbol.
+   DumpSessions("quote sessions", g_sessQ, g_sessQN);
+   DumpSessions("trade sessions", g_sessT, g_sessTN);
+   if(g_sessQN == 0 && g_sessTN == 0)
+      PrintFormat("OldMate: %s publishes no session table at all. MT5 does this for "
+                  "symbols that are not session-restricted - crypto, for example. "
+                  "The market is treated as open, and connection, trade mode and "
+                  "quote freshness still gate every send.", _Symbol);
 }
 
 datetime ServerNow()      { return(TimeTradeServer()); }
 
-bool IsOpenNow(datetime serverNow, datetime &untilEnd, datetime &nextOpen)
+bool SessionActive(SessionRec &tab[], int n, datetime serverNow, datetime &endAt)
 {
-   untilEnd = 0;
-   nextOpen = 0;
+   endAt = 0;
    MqlDateTime st;
    TimeToStruct(serverNow, st);
    int sec = st.hour * 3600 + st.min * 60 + st.sec;
 
    bool open = false;
-   for(int i = 0; i < g_sessCount; i++)
+   for(int i = 0; i < n; i++)
    {
-      if(g_sess[i].dow != st.day_of_week) continue;
-      if(sec >= g_sess[i].startSec && sec < g_sess[i].endSec)
-      {
-         open = true;
-         datetime end = (datetime)((long)serverNow - (long)sec + (long)g_sess[i].endSec);
-         if(untilEnd == 0 || end < untilEnd) untilEnd = end;
-      }
+      if(tab[i].dow != st.day_of_week) continue;
+      if(sec < tab[i].startSec || sec >= tab[i].endSec) continue;
+      datetime e = (datetime)((long)serverNow - (long)sec + (long)tab[i].endSec);
+      if(endAt == 0 || e < endAt) endAt = e;
+      open = true;
    }
-   if(open) return(true);
+   return(open);
+}
 
-   //  Next opening time within the coming week.
+bool SessionOpen(SessionRec &tab[], int n, datetime serverNow, datetime &untilEnd, datetime &nextOpen)
+{
+   untilEnd = 0;
+   nextOpen = 0;
+   if(SessionActive(tab, n, serverNow, untilEnd)) return(true);
+
+   MqlDateTime st;
+   TimeToStruct(serverNow, st);
+   int sec = st.hour * 3600 + st.min * 60 + st.sec;
    for(int add = 0; add < 8 && nextOpen == 0; add++)
    {
       int dow = (st.day_of_week + add) % 7;
-      for(int i = 0; i < g_sessCount; i++)
+      for(int i = 0; i < n; i++)
       {
-         if(g_sess[i].dow != dow) continue;
+         if(tab[i].dow != dow) continue;
          datetime base = (datetime)((long)serverNow - (long)sec + (long)add * 86400);
-         datetime s = (datetime)((long)base + (long)g_sess[i].startSec);
-         if(s > serverNow) { if(nextOpen == 0 || s < nextOpen) nextOpen = s; }
+         datetime s    = (datetime)((long)base + (long)tab[i].startSec);
+         if(s > serverNow && (nextOpen == 0 || s < nextOpen)) nextOpen = s;
       }
    }
    return(false);
 }
 
+//  Is the market quoting?  Quote table if the broker has one, otherwise the
+//  trade table, otherwise - no table published - not restricted, so yes.
+bool IsOpenNow(datetime serverNow, datetime &untilEnd, datetime &nextOpen)
+{
+   if(g_sessQN > 0)      return(SessionOpen(g_sessQ, g_sessQN, serverNow, untilEnd, nextOpen));
+   if(g_sessTN > 0)      return(SessionOpen(g_sessT, g_sessTN, serverNow, untilEnd, nextOpen));
+   untilEnd = 0; nextOpen = 0;
+   return(true);
+}
+
+//  May an order be sent right now, on the broker's own trading clock?
+bool TradeWindowOpen(datetime serverNow)
+{
+   if(g_sessTN == 0) return(true);            // not restricted
+   datetime endAt = 0;
+   return(SessionActive(g_sessT, g_sessTN, serverNow, endAt));
+}
 
 string HumanDelta(datetime from, datetime to)
 {
@@ -675,6 +757,7 @@ void RefreshMarket()
 
    bool connected = (TerminalInfoInteger(TERMINAL_CONNECTED) != 0);
    bool tradeable = (g_f.tradeMode != SYMBOL_TRADE_MODE_DISABLED);
+   bool tradeWin  = TradeWindowOpen(ServerNow());
    bool stale     = false;
    if(g_f.lastQuote > 0 &&
       (long)TimeTradeServer() - (long)g_f.lastQuote > (long)(STALE_MINUTES * 60))
@@ -700,12 +783,6 @@ void RefreshMarket()
    {
       g_m.status = 4; g_m.text = "Trading unavailable"; g_m.colour = clrTomato;
    }
-   else if(g_sessCount == 0)
-   {
-      //  No published session table is not a closure. Reporting "closed" here
-      //  would be exactly the false report the rules forbid.
-      g_m.status = 5; g_m.text = "Market status unknown"; g_m.colour = clrSilver;
-   }
    else if(!open)
    {
       g_m.status = 1;
@@ -721,9 +798,21 @@ void RefreshMarket()
    {
       g_m.status = 3; g_m.text = "Stale quote"; g_m.colour = clrOrange;
    }
+   else if(!tradeWin)
+   {
+      //  Quoting but not accepting orders. Sending here would be rejected by
+      //  the broker, so it is reported before anything is attempted.
+      g_m.status = 4;
+      g_m.text = "Trading window shut (quote only)";
+      g_m.colour = clrOrange;
+   }
    else
    {
-      g_m.status = 0; g_m.text = "Market open"; g_m.colour = clrLime;
+      g_m.status = 0;
+      if(g_sessQN > 0)      g_m.text = "Market open";
+      else if(g_sessTN > 0) g_m.text = "Market open (trade clock)";
+      else                  g_m.text = "Market open (no session table)";
+      g_m.colour = clrLime;
    }
 }
 
@@ -748,6 +837,34 @@ bool TerminalAllowsTrade()
 {
    return(TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0 &&
           MQLInfoInteger(MQL_TRADE_ALLOWED) != 0);
+}
+
+//  Everything that stands between a finished plan and a sent order, in the
+//  order SendPlan checks it.  "" means nothing is in the way.
+string SendBlocker(int idx)
+{
+   if(!InpAutoTrade)                    return("master switch off");
+   if(!LaneAllowed(idx))                return(g_lane[idx].name + " switch off");
+   if(!TerminalAllowsTrade())           return("terminal is blocking it");
+   if(g_m.status != 0)
+   {
+      if(g_m.status == 1) return("market closed");
+      if(g_m.status == 2) return("disconnected");
+      if(g_m.status == 3) return("stale quote");
+      if(g_m.status == 4) return(g_m.text);
+      return(g_m.text);
+   }
+
+   //  The broker can forbid one direction outright. Sending into that is a
+   //  guaranteed rejection, so it is named here rather than discovered later.
+   if(g_f.tradeMode == SYMBOL_TRADE_MODE_CLOSEONLY) return("broker is close-only");
+   if(g_f.tradeMode == SYMBOL_TRADE_MODE_LONGONLY && g_plan[idx].dir < 0)
+      return("broker allows buys only");
+   if(g_f.tradeMode == SYMBOL_TRADE_MODE_SHORTONLY && g_plan[idx].dir > 0)
+      return("broker allows sells only");
+   if(NettingOppositeVolume(g_plan[idx].dir) > 0.0) return("netting conflict");
+   if(!InpBypassRisk && OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return("lane risk cap");
+   return("");
 }
 
 string AutoTradeText()
@@ -1887,9 +2004,10 @@ bool MeasureTarget(int idx, int dir, double riskPrice, double tick,
 //  SIZE - 0.5% of equity, converted by the terminal's own money
 //  calculation.  Never hand arithmetic, never an assumed pip value.
 //====================================================================
-double CalcLot(int dir, double entry, double sl, string &why)
+double CalcLot(int dir, double entry, double sl, string &why, string &diag)
 {
    why = "";
+   diag = "";
    if(entry <= 0.0 || sl <= 0.0) { why = "cannot size"; return(0.0); }
 
    ENUM_ORDER_TYPE t = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -1901,6 +2019,15 @@ double CalcLot(int dir, double entry, double sl, string &why)
 
    double budget = AccountInfoDouble(ACCOUNT_EQUITY) * RISK_PCT / 100.0;
    double lots   = budget / lossPerLot;
+   double riskMoney = lossPerLot * lots;
+   diag = StringFormat("risks $%.2f on this stop (budget $%.2f = %.2f%% of equity); "
+                       "min lot %.2f risks $%.2f",
+                       riskMoney, budget, RISK_PCT, g_f.volMin,
+                       lossPerLot * g_f.volMin);
+   if(riskMoney > budget * 1.0001)
+      diag += StringFormat("  -  OVER BUDGET by $%.2f (%.1f%% of equity at risk)",
+                           riskMoney - budget,
+                           100.0 * riskMoney / AccountInfoDouble(ACCOUNT_EQUITY));
 
    double step = g_f.volStep;
    double mn   = g_f.volMin;
@@ -1909,7 +2036,11 @@ double CalcLot(int dir, double entry, double sl, string &why)
 
    if(lots < mn)
    {
-      if(!InpMinLot) { why = "risk budget cannot buy the minimum lot"; return(0.0); }
+      //  Refuse by default.  Minimum lot clamps up; Bypass risk budget does the
+      //  same and also releases the total-exposure cap, for an owner who has
+      //  decided to see the trade rather than the refusal.
+      if(!InpMinLot && !InpBypassRisk)
+      { why = "risk budget cannot buy the minimum lot"; return(0.0); }
       lots = mn;
    }
    if(lots > mx) lots = MathFloor(mx / step + 1e-8) * step;
@@ -1960,6 +2091,7 @@ void PlanClear(int idx)
    g_plan[idx].tp1 = 0.0;
    g_plan[idx].lot = 0.0;
    g_plan[idx].note = "";
+   g_plan[idx].diag = "";
 }
 
 bool BuildPlan(int idx)
@@ -1988,11 +2120,22 @@ bool BuildPlan(int idx)
    double typical = SpreadBaseline(st.hour, sn);
    double gateX = (g_p.spreadGateX > 0.0) ? g_p.spreadGateX : MAX_SPREAD_GATE;
    if(sn >= 20 && typical > 0.0 && spread > typical * gateX)
-   { g_plan[idx].note = "WAIT: spread too wide"; return(false); }
+   {
+      g_plan[idx].note = "WAIT: spread too wide";
+      g_plan[idx].diag = StringFormat("spread %.0f pts, median for this hour %.0f, "
+                                      "gate %.1f x median = %.0f",
+                                      spread / point, typical, gateX, typical * gateX);
+      return(false);
+   }
 
    //  Total exposure cap across lanes.
-   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9)
-   { g_plan[idx].note = "WAIT: lane risk cap reached"; return(false); }
+   if(!InpBypassRisk && OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9)
+   {
+      g_plan[idx].note = "WAIT: lane risk cap reached";
+      g_plan[idx].diag = StringFormat("already open %.2f%% + this idea %.2f%% > cap %.2f%%",
+                                      OpenRiskPct(), RISK_PCT, RISK_TOTAL_PCT);
+      return(false);
+   }
 
    int window = LaneStructWindow(idx);
    int need   = window + 4;
@@ -2029,7 +2172,13 @@ bool BuildPlan(int idx)
             if(p >= bid + offset && (level == 0.0 || p < level)) level = p;
          }
       }
-      if(level <= 0.0) { g_plan[idx].note = "WAIT: no swing to rest the limit on"; return(false); }
+      if(level <= 0.0)
+      {
+         g_plan[idx].note = "WAIT: no swing to rest the limit on";
+         g_plan[idx].diag = StringFormat("no confirmed turn in the last %d bars on the "
+                                         "correct side of the quote", window);
+         return(false);
+      }
       entry = (dir > 0) ? SnapDown(level, tick) : SnapUp(level, tick);
    }
 
@@ -2048,7 +2197,12 @@ bool BuildPlan(int idx)
             stopLevel = r[k].high;
       }
    }
-   if(stopLevel <= 0.0) { g_plan[idx].note = "WAIT: no swing to hide the stop behind"; return(false); }
+   if(stopLevel <= 0.0)
+   {
+      g_plan[idx].note = "WAIT: no swing to hide the stop behind";
+      g_plan[idx].diag = StringFormat("no confirmed turn beyond the entry in %d bars", window);
+      return(false);
+   }
 
    double buffer = MathMax(tick * g_p.stopBufferTicks, spread);
    double sl = (dir > 0) ? SnapDown(stopLevel - buffer, tick)
@@ -2061,7 +2215,12 @@ bool BuildPlan(int idx)
    {
       double minDist = (double)g_f.stopsLevel * point;
       if((dir > 0 && (ask - sl) < minDist) || (dir < 0 && (sl - bid) < minDist))
-      { g_plan[idx].note = "WAIT: stop inside broker minimum"; return(false); }
+      {
+         g_plan[idx].note = "WAIT: stop inside broker minimum";
+         g_plan[idx].diag = StringFormat("stop %.0f pts away, broker minimum %.0f pts",
+                                         MathAbs(entry - sl) / point, minDist / point);
+         return(false);
+      }
    }
 
    //  ---- target ------------------------------------------------------
@@ -2069,7 +2228,14 @@ bool BuildPlan(int idx)
    int reachN = 0;
    string tWhy = "";
    if(!MeasureTarget(idx, dir, risk, tick, dist, reach, reachN, medBars, tWhy))
-   { g_plan[idx].note = "WAIT: " + tWhy; return(false); }
+   {
+      g_plan[idx].note = "WAIT: " + tWhy;
+      g_plan[idx].diag = StringFormat("replay window %d bars, %d needed cases; "
+                                      "history available %d bars",
+                                      REPLAY_BARS, TP_MIN_CASES,
+                                      Bars(_Symbol, g_lane[idx].tf));
+      return(false);
+   }
 
    double tp = (dir > 0) ? SnapDown(entry + dist, tick) : SnapUp(entry - dist, tick);
 
@@ -2095,13 +2261,24 @@ bool BuildPlan(int idx)
 
    double tpDist = MathAbs(tp - entry);
    if(spread > 0.0 && tpDist < spread * TP_COST_X)
-   { g_plan[idx].note = "WAIT: target does not clear spread"; return(false); }
+   {
+      g_plan[idx].note = "WAIT: target does not clear spread";
+      g_plan[idx].diag = StringFormat("target %.0f pts, needs %.1f x spread of %.0f = %.0f pts",
+                                      tpDist / point, TP_COST_X, spread / point,
+                                      spread * TP_COST_X / point);
+      return(false);
+   }
    if(tpDist <= 0.0) { g_plan[idx].note = "WAIT: target too small"; return(false); }
 
    //  ---- size --------------------------------------------------------
-   string sWhy = "";
-   double lot = CalcLot(dir, entry, sl, sWhy);
-   if(lot <= 0.0) { g_plan[idx].note = "WAIT: " + sWhy; return(false); }
+   string sWhy = "", sDiag = "";
+   double lot = CalcLot(dir, entry, sl, sWhy, sDiag);
+   if(lot <= 0.0)
+   {
+      g_plan[idx].note = "WAIT: " + sWhy;
+      g_plan[idx].diag = sDiag;
+      return(false);
+   }
 
    g_plan[idx].ok     = true;
    g_plan[idx].dir    = dir;
@@ -2113,6 +2290,7 @@ bool BuildPlan(int idx)
                                   : SnapUp(entry - 0.5 * tpDist, tick);
    g_plan[idx].lot    = lot;
    g_plan[idx].note   = "";
+   g_plan[idx].diag   = sDiag;
 
    g_lane[idx].reachPct = reach;
    g_lane[idx].reachN   = reachN;
@@ -2313,7 +2491,7 @@ bool SendPlan(int idx)
    //  Netting: two lanes may not hold opposite positions.
    if(NettingOppositeVolume(g_plan[idx].dir) > 0.0) return(false);
 
-   if(OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return(false);
+   if(!InpBypassRisk && OpenRiskPct() + RISK_PCT > RISK_TOTAL_PCT + 1e-9) return(false);
 
    g_trade.SetExpertMagicNumber(LaneMagic(idx));
    g_trade.SetDeviationInPoints(20);
@@ -2699,17 +2877,30 @@ int PRender(int b, string prefix, int x, int y)
    return(h);
 }
 
+//  Delete by NAME PREFIX, not by remembering which index we drew last.
+//  A chart-wide sweep catches:
+//    * leftovers from an earlier run of this EA,
+//    * leftovers after a crash, when OnDeinit never finished,
+//    * any name we did not anticipate.
+//  It is idempotent, so running it at attach and at detach is always safe.
+int DeleteByPrefix(string prefix)
+{
+   int removed = 0;
+   for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+   {
+      string nm = ObjectName(0, i, -1, -1);
+      if(nm == "") continue;
+      if(StringFind(nm, prefix) != 0) continue;
+      if(ObjectDelete(0, nm)) removed++;
+   }
+   return(removed);
+}
+
 void PanelRemoveAll()
 {
-   for(int i = 0; i < 200; i++)
-   {
-      string name = PANEL_PREFIX + IntegerToString(i);
-      if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-      string dn = DETAIL_PREFIX + IntegerToString(i);
-      if(ObjectFind(0, dn) >= 0) ObjectDelete(0, dn);
-   }
-   BoxDelete(PANEL_PREFIX);
-   BoxDelete(DETAIL_PREFIX);
+   DeleteByPrefix(PANEL_PREFIX);
+   DeleteByPrefix(DETAIL_PREFIX);
+   ChartRedraw();
 }
 
 //------------------------------------------------------------------
@@ -2771,8 +2962,12 @@ string PlanStateText(int idx)
 {
    if(!g_lane[idx].ready) return("DATA WAIT");
    if(g_lane[idx].signal == 0) return("NO SIGNAL");
-   if(g_plan[idx].ok) return("READY");
-   return(g_plan[idx].note);
+   if(!g_plan[idx].ok) return(g_plan[idx].note);
+
+   //  A finished plan is only "READY" if it could actually be sent right now.
+   string blocker = SendBlocker(idx);
+   if(blocker != "") return("HOLD: " + blocker);
+   return("READY");
 }
 
 color PlanStateColour(int idx)
@@ -2829,6 +3024,13 @@ void DrawPanel()
 
    PAdd(0, " " + AutoTradeText(), AutoTradeColour(),
         "Autotrading ON is this EA's permission. MT5's own Algo Trading button has a veto of its own.");
+
+   if(InpBypassRisk)
+      PAdd(0, StringFormat(" RISK BYPASS ON - a size may exceed the %.2f%% budget and the %.2f%% total cap",
+                           RISK_PCT, RISK_TOTAL_PCT), clrOrange,
+           "Bypass risk budget is armed. Sizing still uses the terminal's own money "
+           "calculation, and every order reports what it actually risks on hover - but a "
+           "minimum lot that is larger than the budget is no longer refused.");
 
    //  ---- out of range: say it, and stop ------------------------------
    if(!TimeframeAllowed((ENUM_TIMEFRAMES)Period()))
@@ -2891,6 +3093,15 @@ void DrawPanel()
                 DoubleToString(MathAbs(g_plan[i].entry - g_plan[i].sl) / g_f.point, 0) + ")";
       }
       string tip = "WAIT is not a failure: it is the EA refusing to invent a level it cannot measure.";
+      if(!g_plan[i].ok && g_plan[i].diag != "")
+         tip = g_plan[i].note + "  ||  " + g_plan[i].diag;
+      else if(g_plan[i].ok)
+      {
+         tip = (SendBlocker(i) == "")
+               ? "This plan can be sent. " + g_plan[i].diag
+               : "The plan is finished but cannot be sent yet: " + SendBlocker(i) +
+                 ". " + g_plan[i].diag;
+      }
       if(!g_lane[i].ready)
          tip = StringFormat("This lane needs %d closed bars and the terminal has %d. Nothing is claimed until it has them.",
                             g_lane[i].needBars, g_lane[i].haveBars);
@@ -2972,8 +3183,10 @@ void DrawPanel()
            "   STRT " + ReadScoreText(2), clrGray,
         "How often each reading was on the right side, counted from the record. A * means the bounded tweak stopped it counting after it fell below a coin flip.");
    PAdd(0, " " + g_recNote + "  |  Tweak: " + (InpTweakArm ? "armed" : "off") +
-           "  |  Last bar " + TimeToString(ServerNow(), TIME_MINUTES) + " server", clrGray,
-        "The record is a file beside the terminal's data folder. It only ever watches.");
+           "  |  Last bar " + TimeToString(ServerNow(), TIME_MINUTES) +
+           " server  |  build " + EA_BUILD, clrGray,
+        "The record is a file beside the terminal's data folder. It only ever watches. "
+        "The build stamp tells you which version is on the chart.");
 
    g_panelH = PRender(0, PANEL_PREFIX, PANEL_X, PANEL_Y);
    g_panelW = PWidth(0) * (int)MathRound(FONT_SIZE * 0.80) + 2 * PANEL_PAD;
@@ -3178,12 +3391,26 @@ int OnInit()
    RecordLoad();
    ReconcileAll();
 
+   //  A previous instance may have been removed without finishing its cleanup.
+   //  Clear the chart before drawing over it.
+   DeleteByPrefix(PANEL_PREFIX);
+   DeleteByPrefix(DETAIL_PREFIX);
+
    EventSetTimer(1);
    DrawPanel();
+   ChartRedraw();
 
    if(!TimeframeAllowed((ENUM_TIMEFRAMES)Period()))
       Print("OldMate: this chart is ", EnumToString((ENUM_TIMEFRAMES)Period()),
             ". Only M5, M15 and M30 are supported. Nothing will be read, planned or sent.");
+
+   //  One line at attach that answers "why does it say that?" without a
+   //  screenshot, and names the build so a report can be matched to code.
+   PrintFormat("OldMate build %s on %s %s: quote sessions %d, trade sessions %d, "
+               "trade mode %d, connected %d, status '%s'",
+               EA_BUILD, _Symbol, EnumToString((ENUM_TIMEFRAMES)Period()),
+               g_sessQN, g_sessTN, g_f.tradeMode,
+               (int)TerminalInfoInteger(TERMINAL_CONNECTED), g_m.text);
 
    return(INIT_SUCCEEDED);
 }
@@ -3191,13 +3418,23 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   PanelRemoveAll();
+
+   //  Clean up first and unconditionally: whatever happens next, the chart
+   //  should not be left with a box floating over it.
+   int gone = 0;
+   gone += DeleteByPrefix(PANEL_PREFIX);
+   gone += DeleteByPrefix(DETAIL_PREFIX);
    ChartRedraw();
+
    if(g_recH != INVALID_HANDLE)
    {
       FileClose(g_recH);
       g_recH = INVALID_HANDLE;
    }
+
+   //  A named reason, so a report of "abnormal termination" can be read
+   //  against what the EA thought was happening.
+   PrintFormat("OldMate deinit: reason %d, %d chart objects removed", reason, gone);
 }
 
 void OnTick()
